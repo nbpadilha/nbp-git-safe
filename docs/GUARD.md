@@ -24,8 +24,9 @@ negation never unprotects something that another version still protects.
   the commit (deletions are fine: that is how a file is untracked).
 * **content** (agent unlocked): the MAC of every staged blob whose size equals the size of a protected
   file is compared with the MACs of the vault index **and** of the protected files currently on
-  disk (so a copy of a file that is not sealed yet is caught too). Empty files are ignored (every
-  `.gitkeep` would match). Locked agent: this check is skipped with a warning
+  disk (so a copy of a file that is not sealed yet is caught too). Files shorter than 16 bytes
+  are ignored (empty files, `.gitkeep` and one-line placeholders such as `1` or `{}` would match
+  unrelated files; sensitive files are larger). Locked agent: this check is skipped with a warning
   (`run nbp-git-safe unlock`), the path check still runs.
 * **pattern file**: a commit that removes a pattern from `.nbp-safe` (or deletes the file, or adds a
   `!` negation to an existing one) is blocked. Override for one commit:

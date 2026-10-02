@@ -38,6 +38,10 @@ _OID_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 GITLINK_MODE = "160000"
 MAX_LISTED = 20  # violations listed per kind before "and N more"
 BATCH = 200
+# Content check: files shorter than this are not fingerprinted. A whole-file match on a
+# handful of bytes ("1\n", "{}\n", a VERSION file) says nothing about being a copy and
+# would block ordinary files; sensitive files are larger.
+MIN_FINGERPRINT_SIZE = 16
 
 
 class GuardBackend(Protocol):
@@ -205,16 +209,16 @@ def protected_fingerprints(
     git: Git, repo: Repo, cfg: Config, backend: GuardBackend
 ) -> Fingerprints:
     """Vault index entries plus the protected files currently on disk (the stat cache makes the
-    latter cheap). Empty files are ignored: an empty blob reveals nothing and every ``.gitkeep``
-    would match."""
+    latter cheap). Files shorter than ``MIN_FINGERPRINT_SIZE`` are ignored (empty files,
+    ``.gitkeep`` and one-line placeholders would match unrelated files)."""
     state = vault.load_vault(git, backend, cfg)  # type: ignore[arg-type]
     prints = Fingerprints()
     for entry in state.index.entries.values():
-        if entry.size > 0:
+        if entry.size >= MIN_FINGERPRINT_SIZE:
             prints.macs[entry.mac] = entry.size
     analysis = vault.analyze(git, repo, cfg, backend, state)  # type: ignore[arg-type]
     for obs in analysis.observed.values():
-        if obs.mac is not None and obs.size > 0:
+        if obs.mac is not None and obs.size >= MIN_FINGERPRINT_SIZE:
             prints.macs.setdefault(obs.mac, obs.size)
     return prints
 

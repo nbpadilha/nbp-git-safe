@@ -118,7 +118,9 @@ def test_copy_of_a_file_not_sealed_yet_is_caught_too(hooked: Env) -> None:
 
 def test_empty_and_unrelated_files_are_not_false_positives(hooked: Env) -> None:
     repo = hooked.repo
-    repo.write("reports/empty.txt", "")  # protected but empty: fingerprints ignore empties
+    repo.write("reports/empty.txt", "")  # protected but tiny: fingerprints ignore these
+    repo.write("reports/tiny.txt", "1\n")
+    repo.write("docs/tiny.txt", "1\n")  # same bytes as the protected tiny file: fine
     repo.write("docs/.gitkeep", "")
     repo.write("docs/other.txt", "unrelated\n")
     repo.sh("add", "-A")
