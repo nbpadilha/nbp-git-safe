@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: MIT
+# No secrets are used or required. Nothing is published from this workflow.
+#
+# TODO(pin-sha): third-party actions below must be pinned to a full commit SHA before the first
+# push. The SHAs could not be resolved in the offline implementation environment, so the tag
+# comments mark the intended release. Replace each `@<tag>` with `@<40-hex-sha> # <tag>`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin-sha): actions/checkout v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5 # TODO(pin-sha): actions/setup-python v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install uv (pinned, from PyPI)
+        run: python -m pip install uv==0.9.21
+      - name: Sync (frozen lockfile)
+        run: uv sync --frozen
+      - name: Ruff lint
+        run: uv run ruff check
+      - name: Ruff format check
+        run: uv run ruff format --check
+      - name: Tests with coverage (crypto.py must stay at 100% branch coverage)
+        run: uv run pytest -q
