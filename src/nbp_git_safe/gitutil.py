@@ -16,6 +16,43 @@ from pathlib import Path
 
 STATE_DIRNAME = "nbp-safe"
 
+# Variables that tie a git process to ONE repository. A hook in a linked worktree runs with
+# ``GIT_DIR=<repo>/.git/worktrees/<name>`` (and commit hooks with ``GIT_INDEX_FILE``): a scratch
+# repository created by this tool must never inherit them, or ``git init`` re-initialises the REAL
+# repository. One list, used by everything that spawns a git that is not about the user's repo.
+GIT_REPO_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_QUARANTINE_PATH",
+)
+_GIT_REPO_ENV_PREFIXES = ("GIT_PUSH_OPTION_",)
+
+
+def clean_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """A copy of ``env`` (default: the process environment) without the repository-binding git
+    variables (``GIT_REPO_ENV``). Identity, config and locale variables are kept."""
+    source = os.environ if env is None else env
+    drop = set(GIT_REPO_ENV)
+    return {
+        k: v
+        for k, v in source.items()
+        if k not in drop and not k.startswith(_GIT_REPO_ENV_PREFIXES)
+    }
+
 
 class GitError(Exception):
     """A git invocation failed (message carries git's own stderr, never file contents)."""
@@ -85,6 +122,10 @@ class Git:
             check=False,
         )
         return proc.returncode, proc.stdout, proc.stderr
+
+    def clean(self, cwd: Path | str) -> Git:
+        """A ``Git`` for another directory (a scratch repository) with a clean environment."""
+        return Git(cwd, clean_env(self.env))
 
     def try_run(self, *args: str, input: bytes | None = None) -> bytes | None:
         """Return stdout, or ``None`` when git exits non-zero."""
@@ -184,6 +225,41 @@ def hash_objects(git: Git, blobs: Sequence[bytes]) -> list[str]:
 def rev_parse(git: Git, rev: str) -> str | None:
     out = git.try_run("rev-parse", "--verify", "-q", "--end-of-options", rev)
     return out.decode("ascii").strip() if out else None
+
+
+def rev_exists(git: Git, rev: str) -> bool:
+    """Does ``rev`` name a commit? ``False`` only for "no such revision" (for example an unborn
+    ``HEAD``); any other git failure raises, so a broken repository never reads as "absent"."""
+    code, _, _ = git.run_status(
+        "rev-parse", "--verify", "-q", "--end-of-options", rev + "^{commit}"
+    )
+    if code == 0:
+        return True
+    if code == 1:
+        return False
+    raise GitError(f"git rev-parse failed ({code})")
+
+
+def optional_blob(git: Git, path: str, rev: str | None = None) -> bytes | None:
+    """Content of ``path`` (repo-relative) at ``rev``, or in the index when ``rev`` is ``None``.
+
+    ``None`` means exactly "that path does not exist there". Every other failure raises
+    ``GitError``: the callers are security checks and must not treat a broken repository as an
+    empty answer (``try_run`` cannot tell the two apart)."""
+    if rev is None:
+        code, out, _ = git.run_status("ls-files", "-s", "-z", "--", path)
+    else:
+        if not rev_exists(git, rev):
+            return None
+        code, out, _ = git.run_status("ls-tree", "-z", "--full-tree", rev, "--", path)
+    if code != 0:
+        raise GitError(f"git could not look up the pattern file ({code})")
+    record = out.split(b"\0", 1)[0]
+    if not record:
+        return None
+    meta = record.partition(b"\t")[0].split(b" ")
+    sha = (meta[1] if rev is None else meta[2]).decode("ascii", "replace")
+    return git.run("cat-file", "blob", sha)
 
 
 def is_ancestor(git: Git, ancestor: str, descendant: str) -> bool:

@@ -68,7 +68,9 @@ def cloud_sync_client(path: Path, environ: Mapping[str, str] | None = None) -> s
 
 
 def _stash_findings(git: Git, sources: list[bytes]) -> Finding | None:
-    out = git.try_run("stash", "list", "--format=%H")
+    code, out, _err = git.run_status("stash", "list", "--format=%H")
+    if code != 0:
+        return Finding(WARN, f"could not list the stashes (git exited {code}); not checked")
     if not out or not sources:
         return None
     names: set[str] = set()
@@ -168,7 +170,8 @@ def run_doctor(
     # --- tracked clear files and stash
     try:
         tracked = protect.tracked_matches(git, repo)
-    except GitError:
+    except GitError as exc:
+        add(PROBLEM, f"could not check for tracked protected files ({exc}); the guard is blind")
         tracked = []
     if tracked:
         listed = ", ".join(tracked[:LISTED]) + (" ..." if len(tracked) > LISTED else "")
@@ -177,7 +180,7 @@ def run_doctor(
             f"{len(tracked)} protected file(s) are tracked on the main branch ({listed}); "
             "untrack with `git rm --cached` (history may already contain them: see purge)",
         )
-    else:
+    elif not any(f.message.startswith("could not check for tracked") for f in found):
         add(OK, "no protected file is tracked on the main branch")
     sources = guard.pattern_sources(git, repo)
     stash = _stash_findings(git, sources)

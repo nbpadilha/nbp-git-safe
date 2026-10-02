@@ -16,11 +16,13 @@ repository so that neither the user's ``.gitignore`` files nor global excludes i
 from __future__ import annotations
 
 import contextlib
+import shutil
 import tempfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from nbp_git_safe.gitutil import Git, Repo, split_z
+from nbp_git_safe.gitutil import Git, GitError, Repo, split_z
 
 VERSIONED_PATTERNS = ".nbp-safe"
 LOCAL_PATTERNS = ("info", "nbp-safe")
@@ -28,6 +30,7 @@ BLOCK_BEGIN = "# >>> nbp-git-safe managed >>>"
 BLOCK_END = "# <<< nbp-git-safe managed <<<"
 MANAGED_SUFFIX_PATTERNS = ("*.nbp-theirs", "*.nbp-tmp")
 SKIP_SUFFIXES = (".nbp-theirs", ".nbp-tmp")
+SCRATCH_PREFIX = "match-"
 
 
 def pattern_files(repo: Repo) -> list[Path]:
@@ -80,19 +83,30 @@ def match_paths(git: Git, repo: Repo, paths: Sequence[str]) -> set[str]:
 def match_paths_texts(git: Git, texts: Sequence[bytes], paths: Sequence[str]) -> set[str]:
     """Like ``match_paths`` but the pattern sets are given as contents (for example the
     ``.nbp-safe`` of HEAD or of the index). Each text is evaluated on its own and the results
-    are unioned, so a negation in one can never unprotect what another protects."""
+    are unioned, so a negation in one can never unprotect what another protects.
+
+    Fails closed: ``check-ignore`` answers 0 (something matched) or 1 (nothing did); any other
+    status, or a scratch repository that cannot be created, raises ``GitError``, and the callers
+    block. It never reads as "nothing is protected". The scratch repository lives inside the
+    repository's own ``.git/nbp-safe`` (the pattern texts may hold names, and the system temp
+    directory is not a place for them) and runs with a clean git environment, so a hook's
+    ``GIT_DIR`` cannot point it at the real repository."""
     if not paths or not texts:
         return set()
     payload = b"".join(p.encode("utf-8", "surrogateescape") + b"\0" for p in paths)
     matched: set[str] = set()
-    with tempfile.TemporaryDirectory(prefix="nbp-match-") as scratch:
-        scratch_git = Git(scratch, git.env)
-        scratch_git.run("init", "--quiet", "--template=", scratch)
-        git_dir = Path(scratch, ".git")
+    base = _scratch_base(git)
+    base.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_scratch(base)
+    scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=base))
+    try:
+        scratch_git = git.clean(scratch)
+        scratch_git.run("init", "--quiet", "--template=", str(scratch))
+        git_dir = scratch / ".git"
         for number, text in enumerate(texts):
-            pf = Path(scratch, f"patterns-{number}")
+            pf = scratch / f"patterns-{number}"
             pf.write_bytes(text)
-            out = scratch_git.run(
+            code, out, _err = scratch_git.run_status(
                 f"--git-dir={git_dir}",
                 f"--work-tree={scratch}",
                 "-c",
@@ -102,10 +116,29 @@ def match_paths_texts(git: Git, texts: Sequence[bytes], paths: Sequence[str]) ->
                 "-z",
                 "--stdin",
                 input=payload,
-                check=False,
             )
+            if code not in (0, 1):
+                raise GitError(f"git check-ignore failed ({code}); refusing to guess")
             matched.update(split_z(out))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     return matched
+
+
+def _scratch_base(git: Git) -> Path:
+    out = git.text("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    if not out:
+        raise GitError("could not locate the git directory")
+    return Path(out) / "nbp-safe" / "scratch"
+
+
+def _sweep_stale_scratch(base: Path) -> None:
+    """Remove scratch repositories an interrupted run left behind (older than an hour)."""
+    cutoff = time.time() - 3600
+    for child in base.glob(SCRATCH_PREFIX + "*"):
+        with contextlib.suppress(OSError):
+            if child.stat().st_mtime < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ exclude block

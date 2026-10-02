@@ -29,7 +29,7 @@ from typing import Protocol
 
 from nbp_git_safe import crypto, protect, vault
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, rev_parse
+from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, optional_blob, rev_parse
 
 ALLOW_UNPROTECT_ENV = "NBP_SAFE_ALLOW_UNPROTECT"
 VERSIONED_PATTERNS = protect.VERSIONED_PATTERNS
@@ -177,12 +177,8 @@ def pattern_sources(git: Git, repo: Repo, revs: Iterable[str] = ()) -> list[byte
     matched on its own and the results are unioned (a removal or a local negation never
     unprotects)."""
     texts: list[bytes] = []
-    for spec in ("HEAD:" + VERSIONED_PATTERNS, ":" + VERSIONED_PATTERNS):
-        data = git.try_run("cat-file", "blob", spec)
-        if data is not None:
-            texts.append(data)
-    for rev in revs:
-        data = git.try_run("cat-file", "blob", f"{rev}:{VERSIONED_PATTERNS}")
+    for rev in ("HEAD", None, *revs):  # None: the index
+        data = optional_blob(git, VERSIONED_PATTERNS, rev)  # raises on a broken repository
         if data is not None:
             texts.append(data)
     for pf in protect.pattern_files(repo):
@@ -282,8 +278,8 @@ def unprotect_check(git: Git, environ: dict[str, str] | None = None) -> Report:
     )
     if not touched.strip(b"\0"):
         return report
-    old = git.try_run("cat-file", "blob", "HEAD:" + VERSIONED_PATTERNS)
-    new = git.try_run("cat-file", "blob", ":" + VERSIONED_PATTERNS)
+    old = optional_blob(git, VERSIONED_PATTERNS, "HEAD")
+    new = optional_blob(git, VERSIONED_PATTERNS)
     old_lines, new_lines = pattern_lines(old), pattern_lines(new)
     old_set, new_set = set(old_lines), set(new_lines)
     removed = [line for line in old_lines if line not in new_set]
@@ -374,7 +370,7 @@ def check_commit(
                     "path", change.path, "matches the protected set and must not be committed"
                 )
             )
-    new_patterns = git.try_run("cat-file", "blob", ":" + VERSIONED_PATTERNS)
+    new_patterns = optional_blob(git, VERSIONED_PATTERNS)
     if new_patterns is not None and any(c.path == VERSIONED_PATTERNS for c in changes):
         report.warnings.extend(lint_patterns(new_patterns))
     if backend is not None and changes:

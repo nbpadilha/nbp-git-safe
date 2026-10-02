@@ -177,7 +177,9 @@ class Config:
 
 
 def _local_layer(git: Git) -> dict[str, str]:
-    out = git.run("config", "--local", "-z", "--get-regexp", r"^nbp-safe\.", check=False)
+    code, out, _err = git.run_status("config", "--local", "-z", "--get-regexp", r"^nbp-safe\.")
+    if code not in (0, 1):  # 1 = no such key; anything else must not read as "no settings"
+        raise GitError(f"git config failed ({code})")
     layer: dict[str, str] = {}
     for item in split_z(out):
         key, _, value = item.partition("\n")
