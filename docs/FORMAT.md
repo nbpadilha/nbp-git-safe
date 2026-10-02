@@ -132,3 +132,56 @@ without decrypting blobs. Verification uses `hmac.compare_digest`.
 `tests/unit/test_rfc5297.py` checks `AESSIV` against RFC 5297 Appendix A.1 (deterministic) and A.2
 (nonce-based) vectors, proving the primitive. `tests/unit/test_crypto.py` pins the HKDF `key_id`
 derivation and the content MAC against independent HMAC-based computations.
+
+## 10. Vault branch (`refs/heads/nbp-safe`)
+
+An orphan branch built only with git plumbing (`hash-object -w --stdin --no-filters`,
+`update-index --cacheinfo` on a private `GIT_INDEX_FILE`, `write-tree`, `commit-tree`,
+`update-ref <ref> <new> <old>` as compare-and-swap). No worktree, and neither the index nor the
+working tree of the main branch is touched. The tree contains exactly:
+
+| Path             | Content                                                              |
+|------------------|----------------------------------------------------------------------|
+| `.gitattributes` | `* -text -diff -merge\n`                                             |
+| `README.md`      | fixed generic text                                                   |
+| `nbp-safe/index` | the encrypted index (section 6)                                      |
+| `store/<id>`     | one encrypted blob per file (section 5), `<id>` = 32 lowercase hex   |
+
+Anything else in the tree, a non-regular mode, a different `.gitattributes`/`README.md` hash, a
+missing index, or an index entry without a `store/<id>` blob is rejected by `open`.
+
+Commits use the fixed message `nbp-safe: seal`, the fixed identity `nbp-safe
+<nbp-safe@localhost.invalid>` for author and committer, and timestamps rounded down to
+`commit.timeGranularity` (default one hour), always `+0000`. Because AES-SIV is deterministic, sealing
+unchanged content produces the same tree and no commit is created.
+
+Index content validated on `open` (before anything is written): `v == 1`; `key_id` equals the
+agent's key; every file id is 32 lowercase hex; every entry has exactly `path, mode, size, mac,
+created, updated`; `mode` is `100644` or `100755`; `path` is NFC, relative, `/`-separated, has no
+empty/`.`/`..` component, no control characters or `<>:"|?*\`, no component ending in a dot or
+space, no `.git`/`git~N` component, no Windows reserved device name (with or without extension), no
+`.gitattributes`/`.gitignore`/`.gitmodules`/`.nbp-safe`/`.nbp-safe.config` name at any depth and
+no `*.nbp-tmp`/`*.nbp-theirs` suffix; paths must not collide case-insensitively nor be both a file
+and a directory; every path must match the protected set and must not be tracked on the main
+branch. Each decrypted blob must match its entry's `size` and `mac`.
+
+## 11. Agent transport (`agent.json`, handshake, messages)
+
+`<git-common-dir>/nbp-safe/agent.json`: `{v, address, family, authkey (hex, 32 bytes), pid,
+started, expires_at, idle_timeout}`. It never contains the encryption key. The agent listens on a
+named pipe `\.\pipe\nbp-git-safe-<random>` (Windows) or an `AF_UNIX` socket in a private 0700
+directory (POSIX); `multiprocessing.connection` is used with `authkey=None` and only
+`send_bytes`/`recv_bytes(maxlength)` (never `recv`, which unpickles).
+
+Mutual handshake (HMAC-SHA256 keyed with `authkey`, `hmac.compare_digest`):
+
+1. client -> `"NBPAGENT\x01" || cnonce(32)`
+2. server -> `snonce(32) || HMAC(authkey, "nbp-git-safe/agent/v1/server" || cnonce || snonce)`
+3. client verifies, then -> `HMAC(authkey, "nbp-git-safe/agent/v1/client" || cnonce || snonce)`
+4. server verifies, then -> `"OK"`
+
+Handshake messages are limited to 128 bytes and must arrive within 5 s. Requests are
+`u8 proto(1) || u8 op || args` with `args` = length-prefixed (`u32`) parts, at most
+`MAX_BLOB_SIZE + 1 MiB` per message; replies are `u8 proto || u8 status || body` where an error body
+is a short fixed code. Operations: `hello`, `status`, `load_key` (once), `enc_blob`, `dec_blob`,
+`enc_index`, `dec_index`, `mac`, `key_id`, `lock`.
