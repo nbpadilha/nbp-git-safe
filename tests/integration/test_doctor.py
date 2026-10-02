@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
-from nbp_git_safe import doctor, hooks
+from nbp_git_safe import doctor, hooks, protect
 from nbp_git_safe.config import load_config
 from nbp_git_safe.gitutil import discover
 from tests.helpers import NbpRepo
@@ -178,7 +179,7 @@ def test_vault_that_does_not_verify_is_a_problem(hooked: Env) -> None:
 def test_nothing_protected_yet_is_a_warning(hooked: Env) -> None:
     repo = hooked.repo
     (repo.path / ".nbp-safe").unlink()
-    (repo.path / ".git" / "nbp-safe" / "sticky-patterns").unlink()  # a clone with no memory
+    shutil.rmtree(repo.path / ".git" / "nbp-safe" / protect.VERSIONS_DIR)  # a clone with no memory
     report = repo.cli("doctor")
     assert any("nothing is protected yet" in w for w in levels(report.out, "warn"))
 

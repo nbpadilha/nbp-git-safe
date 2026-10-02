@@ -185,10 +185,11 @@ def pattern_sources(
     git: Git, repo: Repo, revs: Iterable[str] = (), *, refresh: bool = True
 ) -> list[bytes]:
     """Every version of the pattern files that counts: ``.nbp-safe`` at HEAD, in the index, in
-    the working tree and at ``revs`` (pushed tips), the local ``.git/info/nbp-safe`` and the
-    sticky memory of every pattern this clone has seen (``protect.refresh_sticky``). Each is
-    matched on its own and the results are unioned (a removal or a local negation never
-    unprotects). ``refresh=False`` leaves the sticky file alone (read-only callers)."""
+    the working tree and at ``revs`` (pushed tips), the local ``.git/info/nbp-safe`` and every
+    earlier version of ``.nbp-safe`` this clone has seen (``protect.record_versions``). Each is
+    matched on its own and the results are unioned (a removal, a local negation or a negation
+    that only a newer version has never unprotects). Versions another one already covers are
+    dropped (they add nothing). ``refresh=False`` leaves the memory alone (read-only callers)."""
     texts: list[bytes] = []
     local_versions: list[bytes] = []
     for rev in ("HEAD", None, *revs):  # None: the index
@@ -198,10 +199,12 @@ def pattern_sources(
             if rev in ("HEAD", None):
                 local_versions.append(data)
     if refresh:
-        protect.refresh_sticky(repo, local_versions)
+        protect.record_versions(repo, local_versions)
     for pf in protect.pattern_files(repo):
         texts.append(pf.read_bytes())
-    return list(dict.fromkeys(texts))
+    unique = [t for t in dict.fromkeys(protect.normalize(t) for t in texts) if t]
+    keep = protect.prune_dominated([protect.lines_of(t) for t in unique])
+    return [unique[i] for i in keep]
 
 
 def protected_among(git: Git, sources: Sequence[bytes], paths: Iterable[str]) -> set[str]:
@@ -425,6 +428,9 @@ def _check_changes(
     pattern, or is a path of the vault index (a sealed file stays protected even when no pattern
     covers it any more), or (agent unlocked) its content equals protected content. Violations are
     appended to ``report``; returns the ``(path, commit)`` keys that were flagged."""
+    # our own configuration files are never "protected paths" (a broad pattern from the remote must
+    # not make the commit that repairs ``.nbp-safe`` impossible)
+    changes = [c for c in changes if c.path.casefold() not in protect.EXEMPT_PATHS]
     if sources:  # our own temp and conflict files never go to the main branch either
         sources = [*sources, protect.managed_suffix_text()]
     matched = protected_among(git, sources, (c.path for c in changes)) if sources else set()

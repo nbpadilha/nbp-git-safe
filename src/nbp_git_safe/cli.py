@@ -197,24 +197,56 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+ACCEPT_CURRENT_PHRASE = "unprotect --accept-current"
+
+
 def cmd_unprotect(args: argparse.Namespace) -> int:
-    repo, _git, _cfg = _context(args)
+    repo, git, _cfg = _context(args)
+    if args.accept_current == bool(args.pattern):
+        raise CliError("give a pattern, or --accept-current (not both)", EXIT_USAGE)
+    if args.accept_current:
+        _typed_confirmation(ACCEPT_CURRENT_PHRASE, args.confirm, "unprotect")
+        accepted = protect.accept_current(git, repo)
+        protect.install_exclude_block(repo)
+        _out(
+            "accepted: the current .nbp-safe is the only base now; "
+            f"{accepted.forgotten_versions} earlier version(s) and "
+            f"{accepted.forgotten_patterns} pattern(s) are forgotten for good"
+        )
+        if accepted.differs_from_head:
+            _err(
+                "nbp-git-safe: HEAD still has another version of .nbp-safe: it keeps protecting "
+                "until the commit that changes it is made (the guard refuses a commit that "
+                "removes patterns unless you deliberately allow it, see docs/GUARD.md)"
+            )
+        _err(
+            "nbp-git-safe: files already sealed stay in the vault; untracked ones are visible to "
+            "`git add -A` from now on"
+        )
+        return EXIT_OK
     pattern = args.pattern
     _typed_confirmation(f"unprotect {pattern}", args.confirm, "unprotect")
-    outcome = protect.unprotect(repo, pattern)
-    if outcome == "still-versioned":
+    outcome = protect.unprotect(git, repo, pattern)
+    if outcome.status == "still-versioned":
         raise CliError(
-            "that pattern is still in .nbp-safe: remove it there (and commit) first; this "
-            "command only forgets patterns the file no longer has"
+            "that pattern is still in .nbp-safe: remove it there first; this command only "
+            "forgets patterns the file no longer has"
         )
-    if outcome == "unknown":
+    if outcome.status == "unknown":
         raise CliError("no such remembered pattern (`nbp-git-safe doctor` lists them)")
     protect.install_exclude_block(repo)
-    _out("forgotten: files matching it are no longer protected by this clone")
-    _err(
-        "nbp-git-safe: files already sealed stay in the vault; untracked ones are visible to "
-        "`git add -A` from now on"
-    )
+    _out("forgotten: the clone's memory of earlier versions of .nbp-safe no longer has it")
+    if outcome.live:
+        _err(
+            f"nbp-git-safe: still protected through {' and '.join(outcome.live)}, which carry it: "
+            "it stays protected until the commit that removes it from .nbp-safe is made (the "
+            "guard refuses that commit unless you deliberately allow it, see docs/GUARD.md)"
+        )
+    else:
+        _err(
+            "nbp-git-safe: files already sealed stay in the vault; untracked ones are visible "
+            "to `git add -A` from now on"
+        )
     return EXIT_OK
 
 
@@ -615,10 +647,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = add(
         "unprotect",
         cmd_unprotect,
-        "forget a pattern that was removed from .nbp-safe but is still protected here",
+        "forget a pattern (or every earlier version of .nbp-safe) that is only protected here "
+        "by this clone's memory",
     )
-    p.add_argument("pattern")
-    p.add_argument("--confirm", help='typed confirmation ("unprotect <pattern>")')
+    p.add_argument("pattern", nargs="?", help="the exact pattern line to forget")
+    p.add_argument(
+        "--accept-current",
+        action="store_true",
+        help="take the current .nbp-safe as the only base and forget every earlier version",
+    )
+    p.add_argument(
+        "--confirm",
+        help='typed confirmation ("unprotect <pattern>" / "unprotect --accept-current")',
+    )
     p = add("hook", cmd_hook, "run a hook handler (called by git, not by hand)")
     p.add_argument("event", choices=hooks.EVENTS)
     p.add_argument("hook_args", nargs=argparse.REMAINDER)

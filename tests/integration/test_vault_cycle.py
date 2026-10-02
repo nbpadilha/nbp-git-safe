@@ -553,7 +553,7 @@ def test_add_all_on_main_does_not_capture_protected_files(env: Env) -> None:
 
 
 def test_exclude_block_lifecycle(env: Env) -> None:
-    repo, _ = discover(env.repo.path, env.git.env)
+    repo, git = discover(env.repo.path, env.git.env)
     from nbp_git_safe import protect
 
     exclude = protect.exclude_path(repo)
@@ -582,7 +582,7 @@ def test_exclude_block_lifecycle(env: Env) -> None:
     assert "new-pattern/" in updated and "data-private/**" in updated
     assert "!data-private/keep-public.txt" not in updated  # a negation is never kept alive
     assert updated.count(protect.BLOCK_BEGIN) == 1
-    assert protect.unprotect(repo, "data-private/**") == "removed"
+    assert protect.unprotect(git, repo, "data-private/**").status == "removed"
     assert protect.install_exclude_block(repo) is True
     assert "data-private/**" not in exclude.read_text()
 

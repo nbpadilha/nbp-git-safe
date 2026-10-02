@@ -334,6 +334,8 @@ def _context(env: dict[str, str] | None = None) -> tuple[Repo, Git, Config]:
 
 
 def _locked_hint(reason: str) -> str:
+    if reason and "elevation" in reason:  # the agent is there, this process cannot talk to it
+        return f"agent unavailable ({reason})"
     base = "locked: run `nbp-git-safe unlock`"
     return f"{base} ({reason})" if reason and "unlock" not in reason else base
 
@@ -471,14 +473,15 @@ def post_refresh(args: Sequence[str]) -> int:
         if not guard.pattern_sources(git, repo):
             return 0
         protect.install_exclude_block(repo)
-        dropped = protect.sticky_only(repo)
+        dropped = protect.lost_protection(git, repo)
         if dropped:
             _say(
-                f"WARNING: {len(dropped)} protected pattern(s) are no longer in .nbp-safe (a pull "
-                "or checkout removed them, or you did) but this clone STILL protects them. If "
-                "that was not you, find out who changed .nbp-safe (git log -p -- .nbp-safe); to "
-                "drop a pattern for real run `nbp-git-safe unprotect <pattern>`; "
-                "`nbp-git-safe doctor` lists them"
+                f"WARNING: {len(dropped)} protected pattern(s) were removed from .nbp-safe, or "
+                "are defeated there by a negation (a pull or checkout brought that, or you did) "
+                "but this clone STILL protects them. If that was not you, find out who changed "
+                ".nbp-safe (git log -p -- .nbp-safe); to drop a pattern for real run "
+                "`nbp-git-safe unprotect <pattern>`, or `nbp-git-safe unprotect --accept-current` "
+                "to take the current file as the only base; `nbp-git-safe doctor` lists them"
             )
         has_vault = rev_parse(git, cfg.vault_ref + "^{commit}") or rev_parse(
             git, cfg.remote_vault_ref + "^{commit}"

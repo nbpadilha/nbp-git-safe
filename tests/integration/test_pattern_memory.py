@@ -13,6 +13,7 @@ lists what is only remembered.
 from __future__ import annotations
 
 import os
+import shutil
 import unicodedata
 from pathlib import Path
 
@@ -163,7 +164,7 @@ def drop_every_pattern(repo: NbpRepo) -> None:
     repo.write(".nbp-safe", ATTACKER_PATTERNS)
     repo.sh("add", ".nbp-safe")
     assert commit(repo, "tidy", env={guard.ALLOW_UNPROTECT_ENV: "1"}).returncode == 0
-    (repo.path / ".git" / "nbp-safe" / protect.STICKY_FILE).unlink(missing_ok=True)
+    shutil.rmtree(repo.path / ".git" / "nbp-safe" / protect.VERSIONS_DIR, ignore_errors=True)
     repo_obj, _ = discover(repo.path, repo.git.env)
     protect.remove_exclude_block(repo_obj)
     protect.install_exclude_block(repo_obj)
@@ -218,51 +219,74 @@ def sticky_repo(isolated_git, tmp_path: Path):  # type: ignore[no-untyped-def]
     return root, repo, git
 
 
-def test_sticky_memory_semantics(isolated_git, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-    root, repo, _git = sticky_repo(isolated_git, tmp_path)
+def version_texts(repo) -> list[list[str]]:  # type: ignore[no-untyped-def]
+    return [protect.lines_of(t) for _vid, t in sorted(protect.stored_versions(repo).items())]
+
+
+def test_version_memory_semantics(isolated_git, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    root, repo, git = sticky_repo(isolated_git, tmp_path)
     (root / ".nbp-safe").write_text("a/\n!a/keep.txt\nb/\n")
-    assert protect.refresh_sticky(repo) is True
-    assert protect.refresh_sticky(repo) is False  # idempotent
-    assert protect.read_patterns(protect.sticky_path(repo)) == ["a/", "!a/keep.txt", "b/"]
+    assert protect.record_versions(repo) is True
+    assert protect.record_versions(repo) is False  # idempotent
+    assert version_texts(repo) == [["a/", "!a/keep.txt", "b/"]]
     assert protect.sticky_only(repo) == []
 
-    (root / ".nbp-safe").write_text("c/\n!c/x\n")  # a, b and the negation vanish
+    # a whole different version: the old one is kept as a version of its own, negation included
+    (root / ".nbp-safe").write_text("c/\n!c/x\n")
     assert protect.sticky_only(repo) == ["a/", "b/"]  # a negation is never kept alive
-    assert protect.refresh_sticky(repo) is True
-    assert protect.read_patterns(protect.sticky_path(repo)) == ["c/", "!c/x", "a/", "b/"]
+    assert protect.record_versions(repo) is True
+    assert sorted(version_texts(repo)) == [["a/", "!a/keep.txt", "b/"], ["c/", "!c/x"]]
     assert protect.block_lines(repo)[:4] == ["c/", "!c/x", "a/", "b/"]
+    # the file and the remembered copy of its own version are one source; the old one is another
+    assert len(protect.pattern_files(repo)) == 2
 
     (root / ".nbp-safe").unlink()  # the whole file deleted upstream
-    assert protect.sticky_only(repo) == ["c/", "a/", "b/"]
-    assert protect.refresh_sticky(repo) is True
-    assert protect.pattern_files(repo) == [protect.sticky_path(repo)]
+    assert sorted(protect.sticky_only(repo)) == ["a/", "b/", "c/"]
+    assert len(protect.pattern_files(repo)) == 2
 
-    assert protect.unprotect(repo, "a/") == "removed"
-    assert protect.unprotect(repo, "a/") == "unknown"
+    removed = protect.unprotect(git, repo, "a/")
+    assert removed.status == "removed" and removed.live == ()
+    assert protect.unprotect(git, repo, "a/").status == "unknown"
     (root / ".nbp-safe").write_text("c/\n")
-    assert protect.unprotect(repo, "c/") == "still-versioned"
-    assert "a/" not in protect.read_patterns(protect.sticky_path(repo))
+    assert protect.unprotect(git, repo, "c/").status == "still-versioned"
+    assert not any("a/" in lines for lines in version_texts(repo))
 
 
-def test_sticky_extra_versions_are_remembered(isolated_git, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_a_version_that_only_adds_patterns_keeps_a_legitimate_negation_working(  # type: ignore[no-untyped-def]
+    isolated_git, tmp_path: Path
+) -> None:
+    root, repo, _git = sticky_repo(isolated_git, tmp_path)
+    (root / ".nbp-safe").write_text("*.csv\n!keep.csv\n")
+    protect.record_versions(repo)
+    (root / ".nbp-safe").write_text("*.csv\n!keep.csv\nextra/\n")  # only a positive was added
+    protect.record_versions(repo)
+    lines = protect.block_lines(repo)
+    assert lines[:3] == ["*.csv", "!keep.csv", "extra/"]
+    assert "*.csv" not in lines[3:]  # the older version is covered: it does not re-add the glob
+    assert len(protect.pattern_files(repo)) == 1  # ... and costs no extra matching run
+
+
+def test_extra_versions_are_remembered(isolated_git, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     root, repo, _git = sticky_repo(isolated_git, tmp_path)
     (root / ".nbp-safe").write_text("now/\n")
-    protect.refresh_sticky(repo, [b"staged-only/\n!neg\n# comment\n"])
-    assert protect.read_patterns(protect.sticky_path(repo)) == ["now/", "staged-only/"]
+    protect.record_versions(repo, [b"staged-only/\n!neg\n# comment\n", b"!only-a-negation\n"])
+    # a version with no positive pattern protects nothing and is not kept
+    assert sorted(version_texts(repo)) == [["now/"], ["staged-only/", "!neg"]]
 
 
 def test_nothing_is_written_when_there_is_nothing_to_remember(isolated_git, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     _root, repo, _git = sticky_repo(isolated_git, tmp_path)
-    assert protect.refresh_sticky(repo) is False
-    assert not protect.sticky_path(repo).exists()
+    assert protect.record_versions(repo) is False
+    assert not protect.versions_dir(repo).exists()
 
 
-@pytest.mark.parametrize("what", ["exclude", "sticky"])
+@pytest.mark.parametrize("what", ["exclude", "versions"])
 def test_state_files_do_not_hold_names_beyond_the_patterns(hooked: Env, what: str) -> None:
     repo = hooked.repo
-    text = (
-        (repo.path / ".git" / "info" / "exclude").read_text()
-        if what == "exclude"
-        else (repo.path / ".git" / "nbp-safe" / protect.STICKY_FILE).read_text()
-    )
+    if what == "exclude":
+        text = (repo.path / ".git" / "info" / "exclude").read_text()
+    else:
+        files = list((repo.path / ".git" / "nbp-safe" / protect.VERSIONS_DIR).iterdir())
+        assert files
+        text = "".join(f.read_text() for f in files)
     assert not any(c in text for c in repo.canaries)
