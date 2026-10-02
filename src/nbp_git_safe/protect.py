@@ -16,6 +16,7 @@ repository so that neither the user's ``.gitignore`` files nor global excludes i
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 import tempfile
 import time
@@ -31,17 +32,31 @@ BLOCK_END = "# <<< nbp-git-safe managed <<<"
 MANAGED_SUFFIX_PATTERNS = ("*.nbp-theirs", "*.nbp-tmp")
 SKIP_SUFFIXES = (".nbp-theirs", ".nbp-tmp")
 SCRATCH_PREFIX = "match-"
+STICKY_FILE = "sticky-patterns"
+
+
+def sticky_path(repo: Repo) -> Path:
+    return repo.state_dir / STICKY_FILE
 
 
 def pattern_files(repo: Repo) -> list[Path]:
-    """Existing pattern files: versioned first, then local."""
-    candidates = [repo.toplevel / VERSIONED_PATTERNS, repo.common_dir.joinpath(*LOCAL_PATTERNS)]
+    """Existing pattern files: versioned first, then local, then the sticky memory."""
+    candidates = [
+        repo.toplevel / VERSIONED_PATTERNS,
+        repo.common_dir.joinpath(*LOCAL_PATTERNS),
+        sticky_path(repo),
+    ]
     return [p for p in candidates if p.is_file()]
 
 
 def read_patterns(path: Path) -> list[str]:
     """Meaningful pattern lines (no blanks/comments; never our own markers)."""
-    text = path.read_bytes().decode("utf-8", "surrogateescape")
+    return lines_of(path.read_bytes())
+
+
+def lines_of(data: bytes) -> list[str]:
+    """Meaningful pattern lines of a pattern file's content."""
+    text = data.decode("utf-8", "surrogateescape")
     lines = []
     for raw in text.split("\n"):
         line = raw.rstrip("\r")
@@ -49,6 +64,81 @@ def read_patterns(path: Path) -> list[str]:
             continue
         lines.append(line)
     return lines
+
+
+# ----------------------------------------------------------------------- sticky memory
+
+
+def _current_lines(repo: Repo) -> list[str]:
+    versioned = repo.toplevel / VERSIONED_PATTERNS
+    return read_patterns(versioned) if versioned.is_file() else []
+
+
+def _sticky_lines(repo: Repo) -> list[str]:
+    path = sticky_path(repo)
+    return read_patterns(path) if path.is_file() else []
+
+
+def merged_lines(repo: Repo, extra_texts: Sequence[bytes] = ()) -> list[str]:
+    """The versioned patterns as they are now, followed by every positive pattern this clone has
+    ever seen in them (or in ``extra_texts``) and that is gone from the file: the sticky ones.
+    Removing a pattern upstream (a push from the web, a merge) never shrinks the protected set;
+    only ``unprotect`` does."""
+    current = _current_lines(repo)
+    present = set(current)
+    seen = _sticky_lines(repo)
+    for text in extra_texts:
+        seen.extend(lines_of(text))
+    extra = [
+        line for line in dict.fromkeys(seen) if line not in present and not line.startswith("!")
+    ]
+    return [*current, *extra]
+
+
+def sticky_only(repo: Repo) -> list[str]:
+    """Patterns protected only by this clone's memory: in ``.nbp-safe`` once, not any more."""
+    present = set(_current_lines(repo))
+    return [
+        line for line in _sticky_lines(repo) if line not in present and not line.startswith("!")
+    ]
+
+
+def _write_sticky(repo: Repo, lines: Sequence[str]) -> None:
+    path = sticky_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8", "surrogateescape")
+    tmp = path.with_name(f"{STICKY_FILE}.{os.getpid()}.tmp")
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def refresh_sticky(repo: Repo, extra_texts: Sequence[bytes] = ()) -> bool:
+    """Bring the sticky file up to date with the versioned patterns (and with any other version of
+    them in ``extra_texts``, for example the staged one). True if it changed. It never drops a
+    pattern that is gone upstream."""
+    wanted = merged_lines(repo, extra_texts)
+    path = sticky_path(repo)
+    if not wanted and not path.exists():
+        return False
+    if path.is_file() and _sticky_lines(repo) == wanted:
+        return False
+    _write_sticky(repo, wanted)
+    return True
+
+
+def unprotect(repo: Repo, pattern: str) -> str:
+    """Forget a sticky pattern (the explicit, confirmed local act). Returns ``"removed"``,
+    ``"still-versioned"`` (it is in ``.nbp-safe`` too: remove it there first) or ``"unknown"``."""
+    if pattern in set(_current_lines(repo)):
+        return "still-versioned"
+    old = _sticky_lines(repo)
+    if pattern not in old:
+        return "unknown"
+    _write_sticky(repo, [line for line in old if line != pattern])
+    return "removed"
 
 
 def list_protected(git: Git, repo: Repo) -> list[str]:
@@ -149,13 +239,10 @@ def exclude_path(repo: Repo) -> Path:
 
 
 def block_lines(repo: Repo) -> list[str]:
-    """Patterns written into the managed block: versioned patterns, local patterns without
-    negations (a local ``!`` must not re-expose a versioned pattern), then the temp/conflict
-    suffix patterns."""
-    lines: list[str] = []
-    versioned = repo.toplevel / VERSIONED_PATTERNS
-    if versioned.is_file():
-        lines.extend(read_patterns(versioned))
+    """Patterns written into the managed block: the versioned patterns plus the ones only the
+    sticky memory still has, local patterns without negations (a local ``!`` must not re-expose a
+    versioned pattern), then the temp/conflict suffix patterns."""
+    lines: list[str] = merged_lines(repo)
     local = repo.common_dir.joinpath(*LOCAL_PATTERNS)
     if local.is_file():
         lines.extend(line for line in read_patterns(local) if not line.startswith("!"))
@@ -222,7 +309,10 @@ def _remove_block(path: Path) -> bool:
 
 
 def install_exclude_block(repo: Repo) -> bool:
-    """Create or update the managed block (idempotent). Returns True if the file changed."""
+    """Create or update the managed block (idempotent). Returns True if the file changed. The
+    sticky memory is refreshed first, so the block never loses a pattern that disappeared from
+    ``.nbp-safe``."""
+    refresh_sticky(repo)
     return _install_block(exclude_path(repo), block_lines(repo))
 
 

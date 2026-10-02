@@ -178,5 +178,14 @@ def test_vault_that_does_not_verify_is_a_problem(hooked: Env) -> None:
 def test_nothing_protected_yet_is_a_warning(hooked: Env) -> None:
     repo = hooked.repo
     (repo.path / ".nbp-safe").unlink()
+    (repo.path / ".git" / "nbp-safe" / "sticky-patterns").unlink()  # a clone with no memory
     report = repo.cli("doctor")
     assert any("nothing is protected yet" in w for w in levels(report.out, "warn"))
+
+
+def test_a_deleted_pattern_file_is_still_protecting_through_the_memory(hooked: Env) -> None:
+    repo = hooked.repo
+    (repo.path / ".nbp-safe").unlink()
+    report = repo.cli("doctor")
+    assert not any("nothing is protected yet" in w for w in levels(report.out, "warn"))
+    assert any("still protected here" in w for w in levels(report.out, "warn"))

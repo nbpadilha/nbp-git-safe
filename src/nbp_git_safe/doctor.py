@@ -182,7 +182,16 @@ def run_doctor(
         )
     elif not any(f.message.startswith("could not check for tracked") for f in found):
         add(OK, "no protected file is tracked on the main branch")
-    sources = guard.pattern_sources(git, repo)
+    dropped = protect.sticky_only(repo)
+    if dropped:
+        listed = ", ".join(dropped[:LISTED]) + (" ..." if len(dropped) > LISTED else "")
+        add(
+            WARN,
+            f"{len(dropped)} pattern(s) were removed from .nbp-safe but are still protected here "
+            f"by this clone's memory ({listed}); if the removal was not yours, check `git log -p "
+            "-- .nbp-safe`; to drop one for real: `nbp-git-safe unprotect <pattern>`",
+        )
+    sources = guard.pattern_sources(git, repo, refresh=False)
     stash = _stash_findings(git, sources)
     if stash:
         found.append(stash)

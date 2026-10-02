@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from nbp_git_safe import crypto, protect, vault
+from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
 from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, optional_blob, rev_parse
 
@@ -171,16 +172,24 @@ def read_blobs(git: Git, shas: Sequence[str]) -> Iterator[tuple[str, bytes]]:
 # ------------------------------------------------------------------------- protected set
 
 
-def pattern_sources(git: Git, repo: Repo, revs: Iterable[str] = ()) -> list[bytes]:
+def pattern_sources(
+    git: Git, repo: Repo, revs: Iterable[str] = (), *, refresh: bool = True
+) -> list[bytes]:
     """Every version of the pattern files that counts: ``.nbp-safe`` at HEAD, in the index, in
-    the working tree and at ``revs`` (pushed tips), plus the local ``.git/info/nbp-safe``. Each is
+    the working tree and at ``revs`` (pushed tips), the local ``.git/info/nbp-safe`` and the
+    sticky memory of every pattern this clone has seen (``protect.refresh_sticky``). Each is
     matched on its own and the results are unioned (a removal or a local negation never
-    unprotects)."""
+    unprotects). ``refresh=False`` leaves the sticky file alone (read-only callers)."""
     texts: list[bytes] = []
+    local_versions: list[bytes] = []
     for rev in ("HEAD", None, *revs):  # None: the index
         data = optional_blob(git, VERSIONED_PATTERNS, rev)  # raises on a broken repository
         if data is not None:
             texts.append(data)
+            if rev in ("HEAD", None):
+                local_versions.append(data)
+    if refresh:
+        protect.refresh_sticky(repo, local_versions)
     for pf in protect.pattern_files(repo):
         texts.append(pf.read_bytes())
     return list(dict.fromkeys(texts))
@@ -195,10 +204,14 @@ class Fingerprints:
     """MACs of the protected content: sealed in the vault or present in the working tree."""
 
     macs: dict[str, int] = field(default_factory=dict)  # mac hex -> size
+    paths: set[str] = field(default_factory=set)  # collision keys (NFC, case-folded) of the index
 
     @property
     def sizes(self) -> set[int]:
         return set(self.macs.values())
+
+    def has_path(self, path: str) -> bool:
+        return index_mod.collision_key(path) in self.paths
 
 
 def protected_fingerprints(
@@ -210,6 +223,7 @@ def protected_fingerprints(
     state = vault.load_vault(git, backend, cfg)  # type: ignore[arg-type]
     prints = Fingerprints()
     for entry in state.index.entries.values():
+        prints.paths.add(index_mod.collision_key(entry.path))
         if entry.size >= MIN_FINGERPRINT_SIZE:
             prints.macs[entry.mac] = entry.size
     analysis = vault.analyze(git, repo, cfg, backend, state)  # type: ignore[arg-type]
@@ -362,24 +376,49 @@ def check_commit(
     if not sources:
         return report
     changes = staged_changes(git)
-    matched = protected_among(git, sources, (c.path for c in changes))
-    for change in changes:
-        if change.path in matched:
-            report.violations.append(
-                Violation(
-                    "path", change.path, "matches the protected set and must not be committed"
-                )
-            )
+    prints = (
+        protected_fingerprints(git, repo, cfg, backend) if backend is not None and changes else None
+    )
+    _check_changes(
+        git, backend, sources, prints, changes, report, lambda change: "must not be committed"
+    )
     new_patterns = optional_blob(git, VERSIONED_PATTERNS)
     if new_patterns is not None and any(c.path == VERSIONED_PATTERNS for c in changes):
         report.warnings.extend(lint_patterns(new_patterns))
-    if backend is not None and changes:
-        prints = protected_fingerprints(git, repo, cfg, backend)
-        content = content_violations(
-            git, backend, prints, [c for c in changes if c.path not in matched]
-        )
-        report.violations.extend(content)
     return report
+
+
+def _check_changes(
+    git: Git,
+    backend: GuardBackend | None,
+    sources: Sequence[bytes],
+    prints: Fingerprints | None,
+    changes: Sequence[Change],
+    report: Report,
+    where: Callable[[Change], str],
+) -> set[tuple[str, str | None]]:
+    """The checks every staged or pushed change goes through: its path matches a protected
+    pattern, or is a path of the vault index (a sealed file stays protected even when no pattern
+    covers it any more), or (agent unlocked) its content equals protected content. Violations are
+    appended to ``report``; returns the ``(path, commit)`` keys that were flagged."""
+    matched = protected_among(git, sources, (c.path for c in changes)) if sources else set()
+    seen: set[tuple[str, str | None]] = set()
+    for change in changes:
+        key = (change.path, change.commit)
+        if key in seen:
+            continue
+        if change.path in matched:
+            detail = "matches the protected set and " + where(change)
+        elif prints is not None and prints.has_path(change.path):
+            detail = "is a path of the vault and " + where(change)
+        else:
+            continue
+        seen.add(key)
+        report.violations.append(Violation("path", change.path, detail))
+    if backend is not None and prints is not None:
+        rest = [c for c in changes if (c.path, c.commit) not in seen]
+        report.violations.extend(content_violations(git, backend, prints, rest))
+    return seen
 
 
 # ------------------------------------------------------------------------------- pre-push
@@ -453,8 +492,13 @@ def check_code_ref(
     update: RefUpdate,
     remote_name: str,
 ) -> Report:
-    """Path (and, with the agent unlocked, content) checks over every commit being pushed."""
+    """Path (and, with the agent unlocked, content) checks over everything being pushed: every new
+    commit, or, for a ref that does not point at a commit (a tag of a tree or a blob), every object
+    it makes reachable that the remote does not have."""
     report = Report()
+    final, kind = peel(git, update.local_oid)
+    if kind != "commit":
+        return check_object_ref(git, repo, cfg, backend, update, final, kind, remote_name)
     commits = new_commits(git, update, remote_name)
     if not commits:
         return report
@@ -462,26 +506,98 @@ def check_code_ref(
     if not sources:
         return report
     changes = commit_changes(git, commits)
-    matched = protected_among(git, sources, (c.path for c in changes))
-    seen: set[tuple[str, str | None]] = set()
-    for change in changes:
-        key = (change.path, change.commit)
-        if change.path in matched and key not in seen:
-            seen.add(key)
-            short = change.commit[:10] if change.commit else "?"
+    prints = protected_fingerprints(git, repo, cfg, backend) if backend is not None else None
+
+    def where(change: Change) -> str:
+        short = change.commit[:10] if change.commit else "?"
+        return f"is in commit {short} that would be pushed"
+
+    _check_changes(git, backend, sources, prints, changes, report, where)
+    return report
+
+
+def peel(git: Git, oid: str) -> tuple[str, str]:
+    """Follow annotated tags to the final object: ``(object id, "commit" | "tree" | "blob")``.
+    Anything that cannot be resolved raises ``GitError`` (the callers block)."""
+    final = git.text("rev-parse", "--verify", "--end-of-options", oid + "^{}").strip()
+    kind = git.text("cat-file", "-t", final).strip()
+    if kind not in ("commit", "tree", "blob"):
+        raise GitError("unexpected object type")
+    return final, kind
+
+
+def check_object_ref(
+    git: Git,
+    repo: Repo,
+    cfg: Config,
+    backend: GuardBackend | None,
+    update: RefUpdate,
+    final: str,
+    kind: str,
+    remote_name: str,
+) -> Report:
+    """A ref that points at a tree or a blob (usually a tag): list the objects the push would
+    bring (``rev-list --objects``, minus what the remote-tracking refs already have) and check the
+    blobs' paths and contents like those of a commit. A blob has no path, so with the agent locked
+    it cannot be verified at all and the push is refused."""
+    report = Report()
+    if kind == "blob":
+        changes = [Change("", "100644", final, "A")]
+        if backend is None:
             report.violations.append(
                 Violation(
-                    "path",
-                    change.path,
-                    f"matches the protected set and is in commit {short} that would be pushed",
+                    "object",
+                    update.local_ref,
+                    "points at a bare file (no path to check): unlock the agent so its content "
+                    "can be compared, or push it from an unlocked session",
                 )
             )
-    if backend is not None:
-        prints = protected_fingerprints(git, repo, cfg, backend)
-        report.violations.extend(
-            content_violations(git, backend, prints, [c for c in changes if c.path not in matched])
-        )
+            return report
+    else:
+        remotes = f"--remotes={remote_name}" if _remote_exists(git, remote_name) else "--remotes"
+        out = git.text("rev-list", "--objects", final, "--not", remotes)
+        listed = [line.partition(" ") for line in out.splitlines() if line]
+        shas = [sha for sha, _sp, path in listed if path]
+        kinds = _object_types(git, shas)
+        changes = [
+            Change(path, "100644", sha, "A")
+            for sha, _sp, path in listed
+            if path and kinds.get(sha) == "blob"
+        ]
+    if not changes:
+        return report
+    sources = pattern_sources(git, repo, revs=[update.local_oid]) if kind != "blob" else []
+    prints = protected_fingerprints(git, repo, cfg, backend) if backend is not None else None
+    if kind == "blob" and prints is not None:
+        report.violations.extend(content_violations(git, backend, prints, changes))  # type: ignore[arg-type]
+        return report
+    if not sources and prints is None:
+        return report
+    _check_changes(
+        git,
+        backend,
+        sources,
+        prints,
+        changes,
+        report,
+        lambda change: f"is reachable from {update.local_ref}, which would be pushed",
+    )
     return report
+
+
+def _object_types(git: Git, shas: Sequence[str]) -> dict[str, str]:
+    kinds: dict[str, str] = {}
+    for chunk in chunked(list(dict.fromkeys(shas)), 1000):
+        out = git.text(
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype)",
+            input=("\n".join(chunk) + "\n").encode("ascii"),
+        )
+        for line in out.splitlines():
+            parts = line.split(" ")
+            if len(parts) == 2:
+                kinds[parts[0]] = parts[1]
+    return kinds
 
 
 def validate_vault_commit(
@@ -581,13 +697,20 @@ def check_push(
     for update in updates:
         if update.is_delete:
             continue
-        if is_vault_ref(update.local_ref):
-            report.extend(check_vault_ref(git, cfg, backend, update, remote_name))
-        else:
-            try:
+        try:
+            if is_vault_ref(update.local_ref):
+                report.extend(check_vault_ref(git, cfg, backend, update, remote_name))
+            else:
                 report.extend(check_code_ref(git, repo, cfg, backend, update, remote_name))
-            except GitError as exc:  # e.g. a tag of a non-commit object
-                report.warnings.append(f"{update.local_ref}: not checked ({exc})")
+        except GitError:
+            # fail closed: an object that cannot be examined is not an object that is allowed
+            report.violations.append(
+                Violation(
+                    "object",
+                    update.local_ref,
+                    "could not be verified (git failed while examining it); not pushed",
+                )
+            )
     return report
 
 

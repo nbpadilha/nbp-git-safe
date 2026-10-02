@@ -18,6 +18,21 @@ on push, at the pushed tip) plus the local `.git/info/nbp-safe`. Each version is
 with git's own matcher and the results are unioned, so removing a pattern or adding a local `!`
 negation never unprotects something that another version still protects.
 
+**Sticky memory.** The union also includes `.git/nbp-safe/sticky-patterns`: every pattern this
+clone has ever seen in `.nbp-safe` (at `HEAD`, in the index or in the working tree), refreshed by
+`init`, `seal`, `sync`, the hooks and `post-merge`/`post-checkout`. A pattern that disappears from
+`.nbp-safe` (a collaborator removed it on the web, a merge brought the removal) is therefore
+**still protected here**: the exclude block keeps it, `pre-commit`/`pre-push` keep matching it, and
+`post-merge`/`post-checkout` print a loud warning (a count, never names) while `doctor` lists the
+patterns. Negations are not remembered (a removed `!` can only add protection). Only the explicit,
+confirmed `nbp-git-safe unprotect <pattern> --confirm "unprotect <pattern>"` forgets a pattern, and
+only one the file no longer has (remove it from `.nbp-safe` first, committing with
+`NBP_SAFE_ALLOW_UNPROTECT=1`).
+
+**Index membership.** With the agent unlocked, `pre-commit` and `pre-push` also block any staged or
+pushed path that is a path of the vault index (compared in NFC and case-folded), even when no
+pattern covers it any more.
+
 ### pre-commit
 
 * **path**: every staged added/modified/copied/type-changed path that matches the protected set blocks
@@ -46,6 +61,12 @@ yet (`remote_oid..local_oid`, or everything not reachable from a remote-tracking
 branch/tag) and repeats the path and content checks on every one of them: a file that was added and
 removed again is still in the history being sent.
 
+A ref that does not point at a commit (a tag of a tree or of a blob; annotated tags are followed to
+their final target) is walked with `rev-list --objects` minus what the remote-tracking refs already
+have, and its blobs get the same path and content checks. A bare blob has no path, so with the agent
+locked it cannot be verified and the push is refused. **Fail closed:** any ref whose objects cannot
+be examined (git fails while listing them) is a violation, never a warning.
+
 For a vault branch (`refs/heads/nbp-safe[-suffix]`) it validates every new commit instead:
 
 * tree contains only `.gitattributes`, `README.md`, `nbp-safe/index` and `store/<32 hex>` (all mode
@@ -70,8 +91,8 @@ not a valid vault.
 
 `post-commit` seals when the agent is unlocked (silent when there is nothing to seal; a one-line hint
 when locked and protected files exist). `post-merge` and `post-checkout` (branch switches only)
-refresh the exclude block and, when unlocked and a vault exists, run `open`; locked, they print a
-hint. They never fail git.
+refresh the exclude block (never relaxing it: see the sticky memory above) and, when unlocked and a
+vault exists, run `open`; locked, they print a hint. They never fail git.
 
 Hooks never ask the password manager on their own. Only `nbp-safe.autoUnlock=true` (opt-in, local
 `.git/config`) lets a hook run `keyCommand`, with the `keyCommand` timeout; on failure the hook

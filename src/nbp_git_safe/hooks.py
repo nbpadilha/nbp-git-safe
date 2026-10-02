@@ -471,6 +471,15 @@ def post_refresh(args: Sequence[str]) -> int:
         if not guard.pattern_sources(git, repo):
             return 0
         protect.install_exclude_block(repo)
+        dropped = protect.sticky_only(repo)
+        if dropped:
+            _say(
+                f"WARNING: {len(dropped)} protected pattern(s) are no longer in .nbp-safe (a pull "
+                "or checkout removed them, or you did) but this clone STILL protects them. If "
+                "that was not you, find out who changed .nbp-safe (git log -p -- .nbp-safe); to "
+                "drop a pattern for real run `nbp-git-safe unprotect <pattern>`; "
+                "`nbp-git-safe doctor` lists them"
+            )
         has_vault = rev_parse(git, cfg.vault_ref + "^{commit}") or rev_parse(
             git, cfg.remote_vault_ref + "^{commit}"
         )

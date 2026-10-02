@@ -197,6 +197,27 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_unprotect(args: argparse.Namespace) -> int:
+    repo, _git, _cfg = _context(args)
+    pattern = args.pattern
+    _typed_confirmation(f"unprotect {pattern}", args.confirm, "unprotect")
+    outcome = protect.unprotect(repo, pattern)
+    if outcome == "still-versioned":
+        raise CliError(
+            "that pattern is still in .nbp-safe: remove it there (and commit) first; this "
+            "command only forgets patterns the file no longer has"
+        )
+    if outcome == "unknown":
+        raise CliError("no such remembered pattern (`nbp-git-safe doctor` lists them)")
+    protect.install_exclude_block(repo)
+    _out("forgotten: files matching it are no longer protected by this clone")
+    _err(
+        "nbp-git-safe: files already sealed stay in the vault; untracked ones are visible to "
+        "`git add -A` from now on"
+    )
+    return EXIT_OK
+
+
 def cmd_unlock(args: argparse.Namespace) -> int:
     repo, _git, cfg = _context(args)
     newly, status = unlock.unlock(
@@ -570,6 +591,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("purge", cmd_purge, "erase paths from the whole vault history (typed confirmation)")
     p.add_argument("paths", nargs="+")
     p.add_argument("--confirm", help='typed confirmation ("purge <branch>")')
+    p = add(
+        "unprotect",
+        cmd_unprotect,
+        "forget a pattern that was removed from .nbp-safe but is still protected here",
+    )
+    p.add_argument("pattern")
+    p.add_argument("--confirm", help='typed confirmation ("unprotect <pattern>")')
     p = add("hook", cmd_hook, "run a hook handler (called by git, not by hand)")
     p.add_argument("event", choices=hooks.EVENTS)
     p.add_argument("hook_args", nargs=argparse.REMAINDER)

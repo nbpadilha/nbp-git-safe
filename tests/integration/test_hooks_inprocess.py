@@ -280,12 +280,14 @@ def test_vault_validation_edge_cases(inside: Env) -> None:
     assert guard.blob_sizes(git, [ZERO]) == {}
 
 
-def test_check_push_degrades_for_objects_it_cannot_walk(inside: Env) -> None:
+def test_check_push_refuses_objects_it_cannot_examine(inside: Env) -> None:
+    """Review M3: an object that cannot be examined is not an object that is allowed (this used
+    to be a warning, which let a tag of a tree or blob through)."""
     repo_obj, git = discover(inside.repo.path, inside.git.env)
     cfg = load_config(git, repo_obj)
     bogus = guard.RefUpdate("refs/tags/odd", "f" * 40, "refs/tags/odd", ZERO)
     report = guard.check_push(git, repo_obj, cfg, None, [bogus], "origin")
-    assert report.ok and any("not checked" in w for w in report.warnings)
+    assert not report.ok and any("could not be verified" in v.detail for v in report.violations)
     delete = guard.RefUpdate("(delete)", ZERO, "refs/heads/x", "a" * 40)
     assert guard.check_push(git, repo_obj, cfg, None, [delete], "origin").ok
 

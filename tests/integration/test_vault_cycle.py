@@ -577,8 +577,14 @@ def test_exclude_block_lifecycle(env: Env) -> None:
     env.repo.write(".nbp-safe", "reports/\nnew-pattern/\n")  # update
     assert protect.install_exclude_block(repo) is True
     updated = exclude.read_text()
-    assert "new-pattern/" in updated and "data-private/**" not in updated
+    # review A3: a pattern that disappears from .nbp-safe (here: by a local edit, upstream it would
+    # be a pull) is NOT dropped from the block; only `unprotect` forgets it
+    assert "new-pattern/" in updated and "data-private/**" in updated
+    assert "!data-private/keep-public.txt" not in updated  # a negation is never kept alive
     assert updated.count(protect.BLOCK_BEGIN) == 1
+    assert protect.unprotect(repo, "data-private/**") == "removed"
+    assert protect.install_exclude_block(repo) is True
+    assert "data-private/**" not in exclude.read_text()
 
     # a local negation must not re-expose a versioned pattern; local plain patterns are added
     local = repo.common_dir / "info" / "nbp-safe"
