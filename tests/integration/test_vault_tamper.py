@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from nbp_git_safe import crypto, vault
+from nbp_git_safe import agent, crypto, vault
 from tests.helpers import NbpRepo
 from tests.integration.conftest import Env
 
@@ -334,7 +334,7 @@ def test_open_survives_a_garbage_agent_json_gracefully(
     env: Env, clone_factory: CloneFactory
 ) -> None:
     clone = clone_factory(env)
-    clone.state_dir.mkdir(parents=True, exist_ok=True)
-    (clone.state_dir / "agent.json").write_text(json.dumps({"v": 1}))
+    garbage = agent.private_dir(clone.state_dir, create=True) / agent.AGENT_JSON  # type: ignore[operator]
+    garbage.write_text(json.dumps({"v": 1}))
     assert clone.cli("open").code == 3
-    assert not (clone.state_dir / "agent.json").exists()
+    assert not garbage.exists()

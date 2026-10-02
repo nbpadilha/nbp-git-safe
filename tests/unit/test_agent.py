@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from nbp_git_safe import agent, crypto
-from tests.helpers import ThreadAgent
+from tests.helpers import ThreadAgent, make_info
 
 KEY = bytes(range(64))
 
@@ -334,7 +334,9 @@ def test_status_and_repr_never_expose_the_key(agent_thread: Callable[..., Thread
     raw = agent.agent_json_path(ta.state_dir).read_bytes()
     for needle in (KEY, KEY.hex().encode(), crypto.encode_key(KEY).encode()):
         assert needle not in raw
-    assert json.loads(raw)["authkey"] == ta.info.authkey.hex()  # authkey yes, cipher key never
+    assert "authkey" not in json.loads(raw)  # nothing to authenticate with is written ...
+    assert ta.info.authkey.hex().encode() not in raw and ta.info.authkey not in raw
+    assert json.loads(raw)["nonce"] == ta.info.nonce.hex()  # ... only the public nonce
 
 
 # ----------------------------------------------------------------------- lifecycle
@@ -418,10 +420,8 @@ def test_connection_cap_does_not_wedge_agent(agent_thread: Callable[..., ThreadA
 # ----------------------------------------------------------------- state / orphans
 
 
-def _info(pid: int, expires: float, **kw: object) -> agent.AgentInfo:
-    return agent.AgentInfo(
-        "addr", kw.get("family", "AF_PIPE"), b"k" * 32, pid, time.time(), expires, None
-    )  # type: ignore[arg-type]
+def _info(state_dir: Path, pid: int, expires: float) -> agent.AgentInfo:
+    return make_info(state_dir, pid, expires)
 
 
 def _dead_pid() -> int:
@@ -438,7 +438,7 @@ def test_pid_alive() -> None:
 
 
 def test_orphan_with_dead_pid_is_cleaned(tmp_path: Path) -> None:
-    agent.write_agent_info(tmp_path, _info(_dead_pid(), time.time() + 100))
+    agent.write_agent_info(tmp_path, _info(tmp_path, _dead_pid(), time.time() + 100))
     assert agent.cleanup_orphan(tmp_path) is True
     assert not agent.agent_json_path(tmp_path).exists()
     with pytest.raises(agent.AgentNotRunningError):
@@ -446,14 +446,14 @@ def test_orphan_with_dead_pid_is_cleaned(tmp_path: Path) -> None:
 
 
 def test_connect_cleans_orphan_itself(tmp_path: Path) -> None:
-    agent.write_agent_info(tmp_path, _info(_dead_pid(), time.time() + 100))
+    agent.write_agent_info(tmp_path, _info(tmp_path, _dead_pid(), time.time() + 100))
     with pytest.raises(agent.AgentNotRunningError):
         agent.AgentClient.connect(tmp_path)
     assert not agent.agent_json_path(tmp_path).exists()
 
 
 def test_expired_and_corrupted_state_is_cleaned(tmp_path: Path) -> None:
-    agent.write_agent_info(tmp_path, _info(os.getpid(), time.time() - 1))
+    agent.write_agent_info(tmp_path, _info(tmp_path, os.getpid(), time.time() - 1))
     assert agent.cleanup_orphan(tmp_path) is True
     agent.agent_json_path(tmp_path).write_bytes(b"{not json")
     with pytest.raises(agent.AgentNotRunningError):
@@ -465,7 +465,7 @@ def test_expired_and_corrupted_state_is_cleaned(tmp_path: Path) -> None:
 
 def test_live_state_is_not_cleaned_and_missing_is_noop(tmp_path: Path) -> None:
     assert agent.cleanup_orphan(tmp_path) is False
-    agent.write_agent_info(tmp_path, _info(os.getpid(), time.time() + 100))
+    agent.write_agent_info(tmp_path, _info(tmp_path, os.getpid(), time.time() + 100))
     assert agent.cleanup_orphan(tmp_path) is False
     with pytest.raises(agent.AgentNotRunningError):  # live pid but nobody listening
         agent.AgentClient.connect(tmp_path)
@@ -475,28 +475,33 @@ def test_live_state_is_not_cleaned_and_missing_is_noop(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda d: d.update(v=2),
-        lambda d: d.update(authkey="zz"),
-        lambda d: d.update(authkey="00" * 5),
-        lambda d: d.update(family="AF_INET"),
+        lambda d: d.update(v=1),
+        lambda d: d.update(v=3),
+        lambda d: d.update(nonce="zz"),
+        lambda d: d.update(nonce="00" * 5),
+        lambda d: d.pop("nonce"),
         lambda d: d.pop("pid"),
         lambda d: d.update(pid="x"),
+        lambda d: d.update(pid=0),
+        lambda d: d.update(expires_at=float("inf")),
     ],
 )
-def test_agent_json_validation(mutate: Callable[[dict], None]) -> None:
-    data = json.loads(_info(1, time.time() + 1).to_json())
-    data["authkey"] = "aa" * 32
+def test_agent_json_validation(tmp_path: Path, mutate: Callable[[dict], None]) -> None:
+    data = json.loads(_info(tmp_path, 1, time.time() + 1).to_json())
     mutate(data)
+    secret = os.urandom(32)
     with pytest.raises(agent.AgentError, match="corrupted"):
-        agent.AgentInfo.from_json(json.dumps(data).encode())
+        agent.AgentInfo.from_json(json.dumps(data, allow_nan=True).encode(), secret)
     with pytest.raises(agent.AgentError):
-        agent.AgentInfo.from_json(b"\xff\xfe")
+        agent.AgentInfo.from_json(b"\xff\xfe", secret)
 
 
 def test_agent_json_roundtrip_with_idle(tmp_path: Path) -> None:
-    info = agent.AgentInfo("a", "AF_UNIX", os.urandom(32), 7, 1.0, 2.0, 3.0)
+    info = make_info(tmp_path, 7, 2.0, 3.0)
     agent.write_agent_info(tmp_path, info)
-    assert agent.read_agent_info(tmp_path) == info
+    again = agent.read_agent_info(tmp_path)
+    assert again is not None and again.authkey == info.authkey  # derived, not stored
+    assert again.idle_timeout == 3.0 and again.pid == 7
     agent.remove_agent_info(tmp_path)
     agent.remove_agent_info(tmp_path)  # idempotent
     assert agent.read_agent_info(tmp_path) is None
@@ -522,12 +527,12 @@ def test_unlock_guard_clears_stale_lock(tmp_path: Path) -> None:
         pass
 
 
-def test_agent_environment_drops_nbp_safe_variables(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NBP_SAFE_SOMETHING", "secret-ish")
-    monkeypatch.setenv("KEEP_ME", "1")
+def test_agent_environment_is_minimal_and_inherits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("NBP_SAFE_SOMETHING", "PYTHONPATH", "PYTHONSTARTUP", "KEEP_ME"):
+        monkeypatch.setenv(name, "x")
     env = agent._agent_environment()
-    assert "NBP_SAFE_SOMETHING" not in env
-    assert env["KEEP_ME"] == "1"
+    assert set(env) <= {"SYSTEMROOT", "WINDIR", "PATH"}
+    assert not any(k.startswith(("NBP_SAFE_", "PYTHON")) for k in env)
 
 
 def test_reprs_and_errors_never_contain_key_material(

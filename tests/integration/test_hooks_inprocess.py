@@ -10,7 +10,7 @@ import pytest
 from nbp_git_safe import agent, crypto, doctor, guard, hooks, multi, unlock, vault
 from nbp_git_safe.config import load_config
 from nbp_git_safe.gitutil import GitError, discover
-from tests.helpers import ThreadAgent
+from tests.helpers import ThreadAgent, make_info
 from tests.integration.conftest import Env
 from tests.integration.guardkit import commit, first_protected, prune_unreachable
 from tests.integration.test_vault_tamper import read_vault, write_vault_commit
@@ -302,7 +302,7 @@ def test_doctor_reports_a_corrupted_and_a_stale_agent_file(inside: Env) -> None:
     messages = [f.message for f in doctor.run_doctor(git, repo_obj, cfg)]
     assert any("agent.json is corrupted" in m for m in messages)
     inside.agent.stop()
-    stale = agent.AgentInfo("x", "AF_PIPE", b"k" * 32, 2**22, 1.0, 2.0, None)
+    stale = make_info(repo_obj.state_dir, 2**22, 2.0)
     agent.write_agent_info(repo_obj.state_dir, stale)
     messages = [f.message for f in doctor.run_doctor(git, repo_obj, cfg)]
     assert any("agent.json is stale" in m for m in messages)

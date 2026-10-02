@@ -88,7 +88,8 @@ def run_key_command(argv: Sequence[str], timeout: float) -> bytes:
 
 
 def current_status(state_dir: Path) -> dict[str, Any] | None:
-    """Status of the live agent, or ``None`` when none is running (orphans are cleaned)."""
+    """Status of the live agent, or ``None`` when none is running (orphans are cleaned). An agent
+    that answers but fails the authentication raises ``agent.HandshakeError``."""
     try:
         with agent.AgentClient.connect(state_dir) as client:
             return client.status()
@@ -110,13 +111,20 @@ def unlock(
     Order matters for failing closed: the key command runs (and is validated) BEFORE any agent
     process exists, so a failing command leaves nothing running."""
     with agent.unlock_guard(state_dir):
-        existing = current_status(state_dir)
+        try:
+            existing = current_status(state_dir)
+        except agent.HandshakeError:
+            # something answers where the state points but cannot prove it is our agent (a planted
+            # agent.json, or an agent of another secret): it is never given the key, and the new
+            # agent below replaces its record
+            existing = None
         if existing is not None and not existing["locked"]:
             return False, existing
         if existing is not None:  # a running agent that never received a key: replace it
             with contextlib.suppress(agent.AgentError), agent.AgentClient.connect(state_dir) as c:
                 c.lock()
         master = run_key_command(argv or (), key_timeout)
+        # always a NEW agent, started and authenticated by this process (never one found by file)
         status = agent.deliver_key(state_dir, master, ttl, idle_timeout, spawn)
         return True, status
 

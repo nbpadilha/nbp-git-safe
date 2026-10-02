@@ -189,8 +189,10 @@ three-way merge by file id; when both edited the same file, both versions are ke
 
 ## Security FAQ
 
-**Where is the key?** Only in the agent's memory and in your password manager. `agent.json` holds
-the local channel's authentication secret and the PID, never the encryption key.
+**Where is the key?** Only in the agent's memory and in your password manager. The agent's small
+state file lives in a private per-user directory outside the repository and holds the pipe address,
+the PID and a public nonce, never the encryption key (the channel's key is derived from a separate
+secret file in that directory).
 
 **Can someone with the repository read my files or names?** Not without the key: contents are
 AES-SIV blobs and names exist only inside the encrypted index. They can see counts, sizes (bucketed)

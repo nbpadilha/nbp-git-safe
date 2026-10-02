@@ -4,12 +4,23 @@
 Transport: ``multiprocessing.connection`` with ``authkey=None`` (so the stdlib challenge, which
 uses HMAC-MD5 and ``==``, is NOT used) plus our own mutual HMAC-SHA256 handshake compared with
 ``hmac.compare_digest``. Only ``send_bytes`` / ``recv_bytes(maxlength=...)`` are used: ``recv()``
-(which unpickles) is never called. Windows uses an ``AF_PIPE`` named pipe, POSIX an ``AF_UNIX``
-socket inside a private (0700) directory.
+(which unpickles) is never called. Windows uses an ``AF_PIPE`` named pipe created by us with a
+current-user-only DACL and remote clients rejected (``winsec``); POSIX an ``AF_UNIX`` socket
+inside a private (0700) directory, with the peer's uid checked.
 
-``agent.json`` (in ``<git-common-dir>/nbp-safe/``) stores the address, the connection ``authkey``,
-the pid and the expiry. It never stores the encryption key, which is delivered once, over the
-authenticated channel, by ``unlock`` and then lives only in this process.
+Trust (``docs/FORMAT.md`` section 11): ``agent.json`` is NOT a trust anchor. The agent's state
+lives OUTSIDE the repository, in a per-user directory this module creates and re-verifies on every
+use (``%LOCALAPPDATA%\\nbp-git-safe\\<repo hash>`` or ``$XDG_RUNTIME_DIR``/``~/.cache``; owner and
+ACL/mode checked, no links). The connection ``authkey`` is never stored: it is
+``HMAC(agent.secret, nonce)`` where ``agent.secret`` is a random file in that directory and the
+nonce is public (in ``agent.json``). A process that merely plants an ``agent.json`` cannot answer
+the handshake, so it never receives the master key (``unlock`` only ever delivers it to an agent
+this very process started and authenticated) nor plaintext. The client also checks, before
+anything is sent, that the process serving the pipe/socket is the one ``agent.json`` names and
+that it belongs to the current user.
+
+``agent.json`` is never used to decide what to delete: the only paths removed are ``agent.json``
+itself and, on POSIX, a socket whose path is exactly ``<state dir>/s-<24 hex>.sock``.
 """
 
 from __future__ import annotations
@@ -19,13 +30,14 @@ import ctypes
 import hashlib
 import hmac
 import json
+import math
 import os
+import re
 import secrets
-import shutil
+import stat
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -34,11 +46,15 @@ from multiprocessing.connection import Client, Connection, Listener
 from pathlib import Path
 from typing import Any
 
-from nbp_git_safe import crypto
+from nbp_git_safe import crypto, winsec
 
 PROTO = 1
+STATE_VERSION = 2  # agent.json layout (v1 stored the authkey and lived inside .git)
 AGENT_JSON = "agent.json"
+SECRET_FILE = "agent.secret"  # noqa: S105 - a file name, not a secret
 UNLOCK_LOCK = "unlock.lock"
+RUNTIME_NAME = "nbp-git-safe"
+SECRET_LEN = 32
 AUTHKEY_LEN = 32
 NONCE_LEN = 32
 HS_MAGIC = b"NBPAGENT\x01"
@@ -51,6 +67,11 @@ MAX_MESSAGE = crypto.MAX_BLOB_SIZE + (1 << 20)
 MAX_CONNECTIONS = 16
 KEY_WAIT = 30.0  # a freshly spawned agent exits if no key arrives within this time
 START_TIMEOUT = 20.0
+HANDOFF_MAX = 4096  # bytes of the credentials line the CLI sends to a new agent
+_PIPE_RE = re.compile(r"\\\\\.\\pipe\\nbp-git-safe-[0-9a-f]{24}")
+_SOCK_RE = re.compile(r"s-[0-9a-f]{24}\.sock")
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_BINARY = getattr(os, "O_BINARY", 0)
 
 # operations
 OP_HELLO = 1
@@ -151,65 +172,94 @@ def pid_alive(pid: int) -> bool:
 # ------------------------------------------------------------------------------- state
 
 
-@dataclass(frozen=True)
-class AgentInfo:
-    """Contents of ``agent.json``. The authkey is redacted from ``repr``."""
-
-    address: str
-    family: str
-    authkey: bytes = field(repr=False)
-    pid: int
-    started: float
-    expires_at: float
-    idle_timeout: float | None
-
-    def to_json(self) -> bytes:
-        return json.dumps(
-            {
-                "v": PROTO,
-                "address": self.address,
-                "family": self.family,
-                "authkey": self.authkey.hex(),
-                "pid": self.pid,
-                "started": self.started,
-                "expires_at": self.expires_at,
-                "idle_timeout": self.idle_timeout,
-            },
-            sort_keys=True,
-        ).encode("ascii")
-
-    @classmethod
-    def from_json(cls, raw: bytes) -> AgentInfo:
-        try:
-            data = json.loads(raw.decode("utf-8"))
-            authkey = bytes.fromhex(data["authkey"])
-            info = cls(
-                address=str(data["address"]),
-                family=str(data["family"]),
-                authkey=authkey,
-                pid=int(data["pid"]),
-                started=float(data["started"]),
-                expires_at=float(data["expires_at"]),
-                idle_timeout=None if data["idle_timeout"] is None else float(data["idle_timeout"]),
-            )
-        except (ValueError, KeyError, TypeError, AttributeError):
-            raise AgentError("agent.json is corrupted") from None
-        if data.get("v") != PROTO or len(authkey) != AUTHKEY_LEN or info.family not in _FAMILIES:
-            raise AgentError("agent.json is corrupted")
-        return info
-
-    def __repr__(self) -> str:
-        return (
-            f"AgentInfo(address={self.address!r}, pid={self.pid}, "
-            f"expires_at={self.expires_at}, authkey=<redacted>)"
-        )
+class InsecureStateError(AgentError):
+    """The agent's state directory (or its secret) is not under the exclusive control of the
+    current user. Nothing is read from it, written to it or deleted from it."""
 
 
-_FAMILIES = ("AF_PIPE", "AF_UNIX")
+_root_override: list[Path] = []
 
 
-def agent_json_path(state_dir: Path) -> Path:
-    return Path(state_dir) / AGENT_JSON
+def set_runtime_root(root: Path) -> None:
+    """Fix the base directory for this process. Used by a freshly started agent, whose environment
+    is deliberately empty: the starter passes the root it resolved on the command line."""
+    _root_override[:] = [Path(root)]
+
+
+def clear_runtime_root() -> None:
+    _root_override.clear()
+
+
+def runtime_root() -> Path:
+    """Per-user base directory of all agent state (outside any repository)."""
+    if _root_override:
+        return _root_override[0]
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base) if base and os.path.isabs(base) else Path.home() / "AppData" / "Local"
+    else:
+        xdg = os.environ.get("XDG_RUNTIME_DIR")
+        root = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".cache"
+    return root / RUNTIME_NAME
+
+
+def repo_key(state_dir: Path | str) -> str:
+    """Stable name of a repository's state directory: a hash of its canonical path. Computed by
+    this program from the repository location, never read from a file."""
+    canonical = os.path.normcase(os.path.realpath(state_dir))
+    return hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
+def runtime_path(state_dir: Path | str) -> Path:
+    """Where the agent of the repository whose ``.git/nbp-safe`` is ``state_dir`` keeps its files
+    (pure computation: nothing is touched)."""
+    return runtime_root() / repo_key(state_dir)
+
+
+def _dir_problem(path: Path) -> str | None:
+    """Why ``path`` is not a private directory of the current user, or ``None``."""
+    if sys.platform == "win32":
+        return winsec.private_dir_problem(path)
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return "cannot be inspected"
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return "is not a plain directory"
+    if st.st_uid != os.geteuid():
+        return "is owned by another user"
+    if st.st_mode & 0o077:
+        return "is accessible to other users"
+    return None
+
+
+def _make_private(path: Path) -> None:
+    if sys.platform == "win32":
+        winsec.create_private_dir(path)
+    else:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(path, 0o700)
+
+
+def private_dir(state_dir: Path | str, *, create: bool) -> Path | None:
+    """The verified state directory of a repository. With ``create=False`` an absent directory
+    gives ``None``. Raises ``InsecureStateError`` for anything that is not private to the user."""
+    root, rdir = runtime_root(), runtime_path(state_dir)
+    for level in (root, rdir):
+        if not os.path.lexists(level):
+            if not create:
+                return None
+            if level is root:
+                level.parent.mkdir(parents=True, exist_ok=True)
+            _make_private(level)
+        problem = _dir_problem(level)
+        if problem:
+            raise InsecureStateError(f"the key agent's state directory is not private: {problem}")
+    return rdir
+
+
+def agent_json_path(state_dir: Path | str) -> Path:
+    return runtime_path(state_dir) / AGENT_JSON
 
 
 SHARING_RETRY_WINDOW = 3.0  # seconds a sharing violation is waited out before it is an error
@@ -235,40 +285,253 @@ def _retry_sharing(operation: Callable[[], Any]) -> Any:
             time.sleep(SHARING_RETRY_STEP)
 
 
-def read_agent_info(state_dir: Path) -> AgentInfo | None:
-    path = agent_json_path(state_dir)
+def load_secret(rdir: Path, *, create: bool) -> bytes | None:
+    """The per-repository secret the connection authkeys are derived from (random, 32 bytes,
+    created once with ``O_EXCL`` inside the private directory). ``None`` if absent and not
+    ``create``. A file that is not a regular file is refused; a short or garbled one is replaced
+    when ``create`` (agents started with the old one become unreachable, which is safe)."""
+    path = rdir / SECRET_FILE
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            if not create:
+                return None
+            try:
+                fd = os.open(
+                    path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _BINARY, 0o600
+                )
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(os.urandom(SECRET_LEN))
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            raise InsecureStateError("the key agent's secret is not a regular file")
+        if st.st_size == SECRET_LEN:
+            data = _retry_sharing(path.read_bytes)
+            if len(data) == SECRET_LEN:
+                return bytes(data)
+        if time.monotonic() >= deadline:
+            if not create:
+                raise AgentError("the key agent's secret is corrupted")
+            with contextlib.suppress(FileNotFoundError):
+                _retry_sharing(path.unlink)
+            deadline = time.monotonic() + 2.0
+            continue
+        time.sleep(0.01)
+
+
+def derive_authkey(secret: bytes, nonce: bytes) -> bytes:
+    return hmac.new(secret, b"nbp-git-safe/agent/authkey/v2" + nonce, hashlib.sha256).digest()
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """Where a new agent listens and how it is authenticated. Made by the process that starts the
+    agent and handed over on a private pipe; it is never read back from ``agent.json``."""
+
+    address: str
+    family: str
+    nonce: bytes = field(repr=False)
+    authkey: bytes = field(repr=False)
+
+    def to_handoff(self) -> bytes:
+        return (
+            json.dumps(
+                {
+                    "v": STATE_VERSION,
+                    "address": self.address,
+                    "family": self.family,
+                    "nonce": self.nonce.hex(),
+                    "authkey": self.authkey.hex(),
+                },
+                sort_keys=True,
+            ).encode("ascii")
+            + b"\n"
+        )
+
+    @classmethod
+    def from_handoff(cls, raw: bytes, rdir: Path) -> Endpoint:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            ep = cls(
+                address=str(data["address"]),
+                family=str(data["family"]),
+                nonce=bytes.fromhex(data["nonce"]),
+                authkey=bytes.fromhex(data["authkey"]),
+            )
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise AgentError("invalid agent hand-off") from None
+        if (
+            data.get("v") != STATE_VERSION
+            or len(ep.nonce) != NONCE_LEN
+            or len(ep.authkey) != AUTHKEY_LEN
+        ):
+            raise AgentError("invalid agent hand-off")
+        check_endpoint(ep.address, ep.family, rdir)
+        return ep
+
+
+def check_endpoint(address: str, family: str, rdir: Path) -> None:
+    """The address must be exactly what this program would have made for ``rdir``: the platform's
+    own family, a pipe name of our shape, or a socket that is a direct child of ``rdir``."""
+    if sys.platform == "win32":
+        ok = family == "AF_PIPE" and _PIPE_RE.fullmatch(address) is not None
+    else:
+        ok = (
+            family == "AF_UNIX"
+            and os.path.isabs(address)
+            and os.path.dirname(address) == str(rdir)
+            and _SOCK_RE.fullmatch(os.path.basename(address)) is not None
+        )
+    if not ok:
+        raise AgentError("agent endpoint is not valid")
+
+
+def new_endpoint(state_dir: Path | str) -> Endpoint:
+    """Fresh nonce, address and derived authkey for a new agent of this repository."""
+    rdir = private_dir(state_dir, create=True)
+    assert rdir is not None
+    secret = load_secret(rdir, create=True)
+    assert secret is not None
+    nonce = os.urandom(NONCE_LEN)
+    if sys.platform == "win32":
+        address, family = rf"\\.\pipe\nbp-git-safe-{secrets.token_hex(12)}", "AF_PIPE"
+    else:
+        address, family = str(rdir / f"s-{secrets.token_hex(12)}.sock"), "AF_UNIX"
+    return Endpoint(address, family, nonce, derive_authkey(secret, nonce))
+
+
+@dataclass(frozen=True)
+class AgentInfo:
+    """What a client needs to reach an agent. ``agent.json`` holds everything but the authkey,
+    which is derived (``derive_authkey``) and never written; it is redacted from ``repr``."""
+
+    address: str
+    family: str
+    authkey: bytes = field(repr=False)
+    pid: int
+    started: float
+    expires_at: float
+    idle_timeout: float | None
+    nonce: bytes = field(default=b"", repr=False)
+
+    def to_json(self) -> bytes:
+        return json.dumps(
+            {
+                "v": STATE_VERSION,
+                "address": self.address,
+                "family": self.family,
+                "nonce": self.nonce.hex(),
+                "pid": self.pid,
+                "started": self.started,
+                "expires_at": self.expires_at,
+                "idle_timeout": self.idle_timeout,
+            },
+            sort_keys=True,
+        ).encode("ascii")
+
+    @classmethod
+    def from_json(cls, raw: bytes, secret: bytes) -> AgentInfo:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            nonce = bytes.fromhex(data["nonce"])
+            info = cls(
+                address=str(data["address"]),
+                family=str(data["family"]),
+                authkey=derive_authkey(secret, nonce),
+                pid=int(data["pid"]),
+                started=float(data["started"]),
+                expires_at=float(data["expires_at"]),
+                idle_timeout=None if data["idle_timeout"] is None else float(data["idle_timeout"]),
+                nonce=nonce,
+            )
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise AgentError("agent.json is corrupted") from None
+        finite = all(math.isfinite(v) for v in (info.started, info.expires_at))
+        if data.get("v") != STATE_VERSION or len(nonce) != NONCE_LEN or not finite or info.pid <= 0:
+            raise AgentError("agent.json is corrupted")
+        return info
+
+    def __repr__(self) -> str:
+        return (
+            f"AgentInfo(address={self.address!r}, pid={self.pid}, "
+            f"expires_at={self.expires_at}, authkey=<redacted>)"
+        )
+
+
+def read_agent_info(state_dir: Path | str) -> AgentInfo | None:
+    """The agent recorded for a repository, with its authkey derived. ``None``: no state at all.
+    Raises ``InsecureStateError`` (nothing is trusted), or ``AgentError`` for a file that is
+    unreadable, malformed or points anywhere but where this program would have put an agent."""
+    rdir = private_dir(state_dir, create=False)
+    if rdir is None:
+        return None
     try:
-        raw = _retry_sharing(path.read_bytes)
+        raw = _retry_sharing((rdir / AGENT_JSON).read_bytes)
     except FileNotFoundError:
         return None
-    return AgentInfo.from_json(raw)
+    secret = load_secret(rdir, create=False)
+    if secret is None:
+        raise AgentError("agent.json is corrupted")
+    info = AgentInfo.from_json(raw, secret)
+    try:
+        check_endpoint(info.address, info.family, rdir)
+    except AgentError:
+        raise AgentError("agent.json is corrupted") from None
+    return info
 
 
-def write_agent_info(state_dir: Path, info: AgentInfo) -> None:
+def write_agent_info(state_dir: Path | str, info: AgentInfo) -> None:
     """Atomically write ``agent.json`` (mode 0600 where the OS supports it)."""
-    state_dir = Path(state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    tmp = state_dir / f"{AGENT_JSON}.{secrets.token_hex(4)}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    rdir = private_dir(state_dir, create=True)
+    assert rdir is not None
+    tmp = rdir / f"{AGENT_JSON}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(info.to_json())
+        handle.flush()
+        os.fsync(handle.fileno())
     try:
-        _retry_sharing(lambda: os.replace(tmp, agent_json_path(state_dir)))
+        _retry_sharing(lambda: os.replace(tmp, rdir / AGENT_JSON))
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
 
 
-def remove_agent_info(state_dir: Path) -> None:
+def remove_agent_info(state_dir: Path | str) -> None:
+    """Delete ``agent.json`` (a path this program computes). Nothing is removed from a directory
+    that fails the privacy check."""
+    try:
+        rdir = private_dir(state_dir, create=False)
+    except InsecureStateError:
+        return
+    if rdir is None:
+        return
     with contextlib.suppress(FileNotFoundError):
-        _retry_sharing(agent_json_path(state_dir).unlink)
+        _retry_sharing((rdir / AGENT_JSON).unlink)
 
 
-def cleanup_orphan(state_dir: Path) -> bool:
-    """Remove a stale ``agent.json`` (unreadable, dead pid or expired). True if removed."""
+def _remove_socket(address: str, rdir: Path) -> None:
+    """Unlink a POSIX socket that ``check_endpoint`` accepted for ``rdir`` (and only that)."""
+    if sys.platform == "win32":
+        return
+    with contextlib.suppress(AgentError, OSError):
+        check_endpoint(address, "AF_UNIX", rdir)
+        if stat.S_ISSOCK(os.lstat(address).st_mode):
+            os.unlink(address)
+
+
+def cleanup_orphan(state_dir: Path | str) -> bool:
+    """Remove a stale ``agent.json`` (unreadable, dead pid or expired). True if removed. The
+    content of the file never decides what else is deleted."""
     try:
         info = read_agent_info(state_dir)
+    except InsecureStateError:
+        return False
     except AgentError:
         remove_agent_info(state_dir)
         return True
@@ -276,9 +539,8 @@ def cleanup_orphan(state_dir: Path) -> bool:
         return False
     if not pid_alive(info.pid) or time.time() >= info.expires_at:
         remove_agent_info(state_dir)
-        if info.family == "AF_UNIX":
-            with contextlib.suppress(OSError):
-                shutil.rmtree(Path(info.address).parent)
+        rdir = runtime_path(state_dir)
+        _remove_socket(info.address, rdir)
         return True
     return False
 
@@ -365,11 +627,93 @@ def server_handshake(conn: Connection, authkey: bytes, timeout: float = HS_TIMEO
         raise HandshakeError("connection closed during handshake") from None
 
 
+# ------------------------------------------------------------------ listener and peer checks
+
+
+def _peer_ids(conn: Connection) -> tuple[int | None, int | None]:
+    """``(pid, uid)`` of the other end of a POSIX ``AF_UNIX`` connection; ``None`` for a value
+    the platform does not report."""
+    import socket
+
+    sock = socket.socket(fileno=os.dup(conn.fileno()))
+    try:
+        if sys.platform.startswith("linux"):
+            raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            pid, uid, _gid = struct.unpack("3i", raw)
+            return int(pid), int(uid)
+        if sys.platform == "darwin":  # LOCAL_PEERCRED (xucred: version, uid, ...) / LOCAL_PEERPID
+            level, peercred, peerpid = 0, 0x001, 0x002
+            cred = sock.getsockopt(level, peercred, 76)
+            uid = struct.unpack_from("=I", cred, 4)[0]
+            pid = struct.unpack("i", sock.getsockopt(level, peerpid, 4))[0]
+            return int(pid), int(uid)
+        return None, None
+    finally:
+        sock.close()
+
+
+class _UnixListener:
+    """``AF_UNIX`` listener that drops connections from other users (the 0700 directory is the
+    first barrier, the peer uid the second)."""
+
+    def __init__(self, address: str) -> None:
+        self._listener = Listener(address, "AF_UNIX", authkey=None)
+        with contextlib.suppress(OSError):
+            os.chmod(address, 0o600)
+
+    def accept(self) -> Connection | None:
+        conn = self._listener.accept()
+        try:
+            _pid, uid = _peer_ids(conn)
+        except OSError:
+            uid = None
+        if uid is not None and uid != os.geteuid():
+            with contextlib.suppress(OSError):
+                conn.close()
+            return None
+        return conn
+
+    def close(self) -> None:
+        self._listener.close()
+
+
+def open_listener(address: str, family: str) -> Any:
+    if sys.platform == "win32":
+        return winsec.HardenedPipeListener(address)
+    return _UnixListener(address)
+
+
+def connect_raw(address: str, family: str) -> Connection:
+    """Open a connection without authenticating it (the caller verifies the server first)."""
+    if sys.platform == "win32":
+        return winsec.connect_pipe(address)
+    return Client(address, family, authkey=None)
+
+
+def verify_server(conn: Connection, info: AgentInfo) -> None:
+    """Before any byte is sent: the process serving this connection must be the one the state
+    names and must belong to the current user."""
+    try:
+        if sys.platform == "win32":
+            pid = winsec.pipe_server_pid(conn._handle)  # type: ignore[attr-defined]
+            if pid != info.pid or not winsec.is_current_user_process(pid):
+                raise HandshakeError("agent process is not the expected one")
+        else:
+            pid_, uid = _peer_ids(conn)
+            if (uid is not None and uid != os.geteuid()) or (pid_ is not None and pid_ != info.pid):
+                raise HandshakeError("agent process is not the expected one")
+    except OSError:
+        raise HandshakeError("agent process could not be identified") from None
+
+
 # ------------------------------------------------------------------------------ server
 
 
 class AgentServer:
-    """The agent. ``exit_func`` is ``os._exit`` in the real process; tests inject a stub."""
+    """The agent. ``exit_func`` is ``os._exit`` in the real process; tests inject a stub.
+
+    ``endpoint`` is what the process that started the agent handed over (address and authkey);
+    without it (thread mode in tests) the server makes its own, exactly as ``new_endpoint``."""
 
     def __init__(
         self,
@@ -379,19 +723,20 @@ class AgentServer:
         *,
         exit_func: Callable[[int], Any] = os._exit,
         key_wait: float = KEY_WAIT,
+        endpoint: Endpoint | None = None,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.ttl = float(ttl)
         self.idle_timeout = idle_timeout
         self._exit = exit_func
         self._key_wait = key_wait
+        self._endpoint = endpoint
         self._keys: crypto.KeySet | None = None
-        self._authkey = os.urandom(AUTHKEY_LEN)
+        self._authkey = b""
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
-        self._listener: Listener | None = None
-        self._unix_dir: Path | None = None
+        self._listener: Any = None
         self._started = 0.0
         self._expires_at = 0.0
         self._last_activity = 0.0
@@ -399,25 +744,24 @@ class AgentServer:
 
     # -- lifecycle
     def start(self) -> AgentInfo:
-        if sys.platform == "win32":
-            family = "AF_PIPE"
-            address = rf"\\.\pipe\nbp-git-safe-{secrets.token_hex(12)}"
-        else:
-            family = "AF_UNIX"
-            self._unix_dir = Path(tempfile.mkdtemp(prefix="nbp-safe-"))  # mkdtemp is 0700
-            address = str(self._unix_dir / "agent.sock")
-        self._listener = Listener(address, family, authkey=None)
+        endpoint = self._endpoint or new_endpoint(self.state_dir)
+        rdir = private_dir(self.state_dir, create=True)
+        assert rdir is not None
+        check_endpoint(endpoint.address, endpoint.family, rdir)
+        self._authkey = endpoint.authkey
+        self._listener = open_listener(endpoint.address, endpoint.family)
         now = time.time()
         self._started = self._last_activity = now
         self._expires_at = now + self.ttl
         self.info = AgentInfo(
-            address=address,
-            family=family,
-            authkey=self._authkey,
+            address=endpoint.address,
+            family=endpoint.family,
+            authkey=endpoint.authkey,
             pid=os.getpid(),
             started=now,
             expires_at=self._expires_at,
             idle_timeout=self.idle_timeout,
+            nonce=endpoint.nonce,
         )
         write_agent_info(self.state_dir, self.info)
         threading.Thread(target=self._watchdog, name="nbp-watchdog", daemon=True).start()
@@ -432,6 +776,8 @@ class AgentServer:
                 if self._stopping.is_set():
                     return
                 time.sleep(0.05)
+                continue
+            if conn is None:  # a peer of another user, already hung up on
                 continue
             if self._stopping.is_set():
                 with contextlib.suppress(OSError):
@@ -450,21 +796,36 @@ class AgentServer:
         self._keys = None
         try:
             # the key is already gone; a stuck file must never keep the process alive
-            with contextlib.suppress(OSError):
-                remove_agent_info(self.state_dir)
+            with contextlib.suppress(OSError, AgentError):
+                self._remove_own_info()
+            if self.info is not None:
+                _remove_socket(self.info.address, runtime_path(self.state_dir))
         finally:
-            if self._unix_dir is not None:
-                shutil.rmtree(self._unix_dir, ignore_errors=True)
             if self._exit is not os._exit:
                 self._wake()  # thread mode (tests): unblock accept()
             self._exit(0)
+
+    def _remove_own_info(self) -> None:
+        """Remove ``agent.json`` only while it still describes THIS agent: a replacement agent
+        started right after a ``lock`` must not lose its record to us."""
+        if self.info is None:
+            return
+        rdir = private_dir(self.state_dir, create=False)
+        if rdir is None:
+            return
+        try:
+            current = _retry_sharing((rdir / AGENT_JSON).read_bytes)
+        except FileNotFoundError:
+            return
+        if current == self.info.to_json():
+            remove_agent_info(self.state_dir)
 
     def _wake(self) -> None:
         """Unblock ``accept`` (used by thread-mode shutdown in tests)."""
         if self.info is None:
             return
         with contextlib.suppress(Exception):
-            Client(self.info.address, self.info.family, authkey=None).close()
+            connect_raw(self.info.address, self.info.family).close()
 
     def _watchdog(self) -> None:
         while not self._stopping.wait(0.05):
@@ -611,25 +972,29 @@ class AgentClient:
     @classmethod
     def connect(cls, state_dir: Path) -> AgentClient:
         """Connect to the live agent of ``state_dir`` or raise ``AgentNotRunningError``."""
+        gone = "key agent is not running (run `nbp-git-safe unlock`)"
         try:
             info = read_agent_info(state_dir)
+        except InsecureStateError as exc:
+            raise AgentNotRunningError(str(exc)) from None
         except AgentError:
             remove_agent_info(state_dir)
             raise AgentNotRunningError("agent state was corrupted and has been removed") from None
         if info is None:
-            raise AgentNotRunningError("key agent is not running (run `nbp-git-safe unlock`)")
+            raise AgentNotRunningError(gone)
         if not pid_alive(info.pid) or time.time() >= info.expires_at:
             cleanup_orphan(state_dir)
-            raise AgentNotRunningError("key agent is not running (run `nbp-git-safe unlock`)")
+            raise AgentNotRunningError(gone)
         return cls.connect_info(info)
 
     @classmethod
     def connect_info(cls, info: AgentInfo) -> AgentClient:
         try:
-            conn = Client(info.address, info.family, authkey=None)
+            conn = connect_raw(info.address, info.family)
         except (OSError, EOFError):
             raise AgentNotRunningError("key agent is not reachable") from None
         try:
+            verify_server(conn, info)  # who is serving this? decided before anything is sent
             client_handshake(conn, info.authkey)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -719,8 +1084,12 @@ def _pack_u32(value: int) -> bytes:
 
 
 def _agent_environment() -> dict[str, str]:
-    """Environment for the agent process: ``NBP_SAFE_*`` variables are not inherited."""
-    return {k: v for k, v in os.environ.items() if not k.startswith("NBP_SAFE_")}
+    """The agent's whole environment: nothing is inherited (no ``PYTHON*``, no ``NBP_SAFE_*``, no
+    ``PATH`` of the caller). Windows needs ``SYSTEMROOT`` (sockets); everything else is explicit."""
+    if sys.platform == "win32":
+        root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+        return {"SYSTEMROOT": root, "WINDIR": root, "PATH": str(Path(root) / "System32")}
+    return {"PATH": "/usr/bin:/bin"}
 
 
 def _agent_executable() -> str:
@@ -732,14 +1101,55 @@ def _agent_executable() -> str:
     return str(exe)
 
 
-def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> AgentInfo:
-    """Start the agent detached and wait until it publishes ``agent.json``."""
-    state_dir = Path(state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    argv = [_agent_executable(), "-m", "nbp_git_safe.agent", "--state-dir", str(state_dir)]
-    argv += ["--ttl", repr(float(ttl))]
+def _agent_argv(state_dir: Path, ttl: float, idle_timeout: float | None) -> list[str]:
+    """``-I``: isolated mode (no ``PYTHON*`` variables, no user site, and neither the current
+    directory nor the script directory on ``sys.path``), so nothing planted next to the caller can
+    be imported into the process that holds the key."""
+    argv = [_agent_executable(), "-I", "-m", "nbp_git_safe.agent", "--state-dir", str(state_dir)]
+    argv += ["--runtime-root", str(runtime_root()), "--ttl", repr(float(ttl))]
     if idle_timeout is not None:
         argv += ["--idle", repr(float(idle_timeout))]
+    return argv
+
+
+def _read_ready(proc: subprocess.Popen[bytes], timeout: float) -> int:
+    """The agent's ``READY <pid>`` line, read from the private pipe only this process holds."""
+    assert proc.stdout is not None
+    box: list[bytes] = []
+    reader = threading.Thread(target=lambda: box.append(proc.stdout.readline()), daemon=True)  # type: ignore[union-attr]
+    reader.start()
+    reader.join(timeout)
+    match = re.fullmatch(rb"READY (\d{1,10})\r?\n?", box[0]) if box else None
+    if match is None:
+        raise AgentError("key agent failed to start")
+    return int(match.group(1))
+
+
+def _is_our_child(pid: int, proc: subprocess.Popen[bytes]) -> bool:
+    """Is ``pid`` the process we started, or (Windows venv launchers re-exec the interpreter) a
+    direct child of it?"""
+    if pid == proc.pid:
+        return True
+    return sys.platform == "win32" and winsec.parent_pid(pid) == proc.pid
+
+
+def _kill_quietly(proc: subprocess.Popen[bytes]) -> None:
+    with contextlib.suppress(Exception):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait(5)
+
+
+def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> AgentInfo:
+    """Start a NEW agent, detached, and return what is needed to reach it.
+
+    The authkey and the address are generated here and sent to the child over its stdin pipe (never
+    through a file another process could have written); the child answers ``READY <pid>`` on its
+    stdout pipe. The pid it reports must be the process started here (or its direct child, for a
+    launcher stub), and the connection that follows is checked against that pid."""
+    state_dir = Path(state_dir)
+    endpoint = new_endpoint(state_dir)  # creates and verifies the private state directory
+    rdir = runtime_path(state_dir)
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
@@ -748,36 +1158,48 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
         )
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell, no secrets
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        _agent_argv(state_dir, ttl, idle_timeout),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         close_fds=True,
-        cwd=tempfile.gettempdir(),
+        cwd=rdir,
         env=_agent_environment(),
         **kwargs,
     )
-    deadline = time.monotonic() + START_TIMEOUT
-    while time.monotonic() < deadline:
-        try:
-            info = read_agent_info(state_dir)
-        except AgentError:
-            info = None
-        if info is not None and info.pid != 0 and pid_alive(info.pid):
-            return info
-        if proc.poll() is not None and info is None:
-            break
-        time.sleep(0.05)
-    raise AgentError("key agent failed to start")
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(endpoint.to_handoff())
+        proc.stdin.close()
+        pid = _read_ready(proc, START_TIMEOUT)
+        if not _is_our_child(pid, proc) or not pid_alive(pid):
+            raise AgentError("key agent failed to start")
+    except BaseException:
+        _kill_quietly(proc)
+        raise
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    now = time.time()
+    return AgentInfo(
+        endpoint.address,
+        endpoint.family,
+        endpoint.authkey,
+        pid,
+        now,
+        now + float(ttl),
+        idle_timeout,
+        endpoint.nonce,
+    )
 
 
 @contextlib.contextmanager
 def unlock_guard(state_dir: Path) -> Any:
     """Serialize concurrent ``unlock`` calls with an exclusive lock file (stale after 3 min)."""
-    state_dir = Path(state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / UNLOCK_LOCK
+    rdir = private_dir(state_dir, create=True)
+    assert rdir is not None
+    path = rdir / UNLOCK_LOCK
     for _ in range(2):
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -811,8 +1233,10 @@ def deliver_key(
 ) -> dict[str, Any]:
     """Start an agent, hand it the master key over the authenticated channel, return its status.
 
-    On any failure after the spawn the agent is told to lock (and its file removed), so a
-    half-initialised agent never stays around."""
+    The key goes only to the agent ``spawn`` just started (its address and authkey are the ones
+    this process generated, and the connection is checked against its pid): never to an agent
+    that was merely found through a file. On any failure after the spawn the agent is told to lock
+    (and its file removed), so a half-initialised agent never stays around."""
     info = spawn(state_dir, ttl, idle_timeout)
     try:
         with AgentClient.connect_info(info) as client:
@@ -835,24 +1259,49 @@ def _harden_process() -> None:
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
-def main(argv: list[str] | None = None, exit_func: Callable[[int], Any] = os._exit) -> int:
+def _read_handoff(fd: int = 0) -> bytes:
+    """One line (at most ``HANDOFF_MAX`` bytes) from the pipe the starter wrote."""
+    data = b""
+    while b"\n" not in data and len(data) < HANDOFF_MAX:
+        chunk = os.read(fd, HANDOFF_MAX - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def _announce_ready(fd: int = 1) -> None:
+    with contextlib.suppress(OSError):
+        os.write(fd, b"READY %d\n" % os.getpid())
+
+
+def main(
+    argv: list[str] | None = None,
+    exit_func: Callable[[int], Any] = os._exit,
+    endpoint: Endpoint | None = None,
+) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="nbp_git_safe.agent")
     parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--runtime-root", default=None)
     parser.add_argument("--ttl", type=float, required=True)
     parser.add_argument("--idle", type=float, default=None)
     args = parser.parse_args(argv)
     _harden_process()
+    if args.runtime_root is not None:
+        set_runtime_root(Path(args.runtime_root))
     state_dir = Path(args.state_dir)
     try:
-        existing = read_agent_info(state_dir)
-    except AgentError:
-        existing = None
-    if existing is not None and existing.pid != os.getpid() and pid_alive(existing.pid):
-        return 3
-    server = AgentServer(state_dir, args.ttl, args.idle, exit_func=exit_func)
-    server.start()
+        if endpoint is None:
+            rdir = private_dir(state_dir, create=True)
+            assert rdir is not None
+            endpoint = Endpoint.from_handoff(_read_handoff(), rdir)
+        server = AgentServer(state_dir, args.ttl, args.idle, exit_func=exit_func, endpoint=endpoint)
+        server.start()
+    except (AgentError, OSError):
+        return 2
+    _announce_ready()
     server.serve_forever()
     return 0
 

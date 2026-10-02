@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,28 @@ class ThreadAgent:
     def stop(self) -> None:
         self.server.shutdown("test")
         self.exited.wait(5)
+
+
+def make_info(
+    state_dir: Path,
+    pid: int,
+    expires: float,
+    idle: float | None = None,
+    *,
+    address: str | None = None,
+) -> agent.AgentInfo:
+    """An ``AgentInfo`` with a valid endpoint and a really derived authkey (nobody listens)."""
+    endpoint = agent.new_endpoint(state_dir)
+    return agent.AgentInfo(
+        address or endpoint.address,
+        endpoint.family,
+        endpoint.authkey,
+        pid,
+        time.time(),
+        expires,
+        idle,
+        endpoint.nonce,
+    )
 
 
 @dataclass

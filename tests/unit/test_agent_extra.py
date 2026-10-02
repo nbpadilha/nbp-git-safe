@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import struct
 import subprocess
@@ -26,6 +27,7 @@ def test_agent_main_runs_serves_and_exits(tmp_path: Path) -> None:
     thread = threading.Thread(
         target=agent.main,
         args=(["--state-dir", str(state), "--ttl", "1.5"], lambda _code: exited.set()),
+        kwargs={"endpoint": agent.new_endpoint(state)},
         daemon=True,
     )
     thread.start()
@@ -38,26 +40,24 @@ def test_agent_main_runs_serves_and_exits(tmp_path: Path) -> None:
     assert agent.read_agent_info(state) is None
 
 
-def test_agent_main_refuses_to_start_next_to_a_live_agent(tmp_path: Path) -> None:
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        info = agent.AgentInfo(
-            "x", "AF_PIPE", os.urandom(32), other.pid, time.time(), time.time() + 60, None
-        )
-        agent.write_agent_info(tmp_path, info)
-        assert agent.main(["--state-dir", str(tmp_path), "--ttl", "5"]) == 3
-        assert agent.read_agent_info(tmp_path) == info  # left untouched
-    finally:
-        other.kill()
-        other.wait()
+def test_agent_main_exits_2_on_an_invalid_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the starter sends over the private pipe is validated; anything else: no agent."""
+    for garbage in (b"", b"not json\n", b'{"v": 2}\n'):
+        monkeypatch.setattr(agent, "_read_handoff", lambda g=garbage: g)
+        assert agent.main(["--state-dir", str(tmp_path), "--ttl", "5"]) == 2
+    assert agent.read_agent_info(tmp_path) is None
 
 
 def test_agent_main_replaces_a_corrupted_state_file(tmp_path: Path) -> None:
-    (tmp_path / "agent.json").write_bytes(b"corrupt")
+    endpoint = agent.new_endpoint(tmp_path)
+    agent.agent_json_path(tmp_path).write_bytes(b"corrupt")
     exited = threading.Event()
     thread = threading.Thread(
         target=agent.main,
         args=(["--state-dir", str(tmp_path), "--ttl", "1"], lambda _code: exited.set()),
+        kwargs={"endpoint": endpoint},
         daemon=True,
     )
     thread.start()
@@ -170,7 +170,7 @@ def test_connect_to_unreachable_address_reports_not_running(tmp_path: Path) -> N
 def test_unlock_guard_survives_lock_file_vanishing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lock = tmp_path / agent.UNLOCK_LOCK
+    lock = agent.private_dir(tmp_path, create=True) / agent.UNLOCK_LOCK  # type: ignore[operator]
     lock.write_bytes(b"")
     real_stat = Path.stat
     calls = {"n": 0}
@@ -193,11 +193,16 @@ def test_spawn_gives_up_when_agent_never_publishes(
     class Dead:
         pid = 1
 
-        def poll(self) -> int:
+        def __init__(self) -> None:
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO(b"")  # the agent died before announcing itself
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
             return 1
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: Dead())
-    (tmp_path / "s").mkdir()
-    (tmp_path / "s" / "agent.json").write_bytes(b"corrupt")  # unreadable while waiting
     with pytest.raises(agent.AgentError, match="failed to start"):
         agent.spawn_agent(tmp_path / "s", 5, None)

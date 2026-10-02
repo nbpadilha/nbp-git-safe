@@ -18,13 +18,15 @@ from pathlib import Path
 import pytest
 
 from nbp_git_safe import agent
+from tests.helpers import make_info
 
 WRITER = """
 import os, sys, time
 from pathlib import Path
 from nbp_git_safe import agent
-info = agent.AgentInfo("x", "AF_PIPE", os.urandom(32), os.getpid(), 1.0, 2.0, None)
 state = Path(sys.argv[1])
+ep = agent.new_endpoint(state)
+info = agent.AgentInfo(ep.address, ep.family, ep.authkey, os.getpid(), 1.0, 2.0, None, ep.nonce)
 errors = 0
 for _ in range(int(sys.argv[2])):
     try:
@@ -35,8 +37,8 @@ print(errors)
 """
 
 
-def _info() -> agent.AgentInfo:
-    return agent.AgentInfo("x", "AF_PIPE", os.urandom(32), os.getpid(), 1.0, 2.0, None)
+def _info(state_dir: Path) -> agent.AgentInfo:
+    return make_info(state_dir, os.getpid(), 2.0)
 
 
 class Flaky:
@@ -56,18 +58,18 @@ class Flaky:
 def test_read_waits_out_a_transient_sharing_violation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    info = _info()
+    info = _info(tmp_path)
     agent.write_agent_info(tmp_path, info)
     flaky = Flaky(Path.read_bytes, 3)
     monkeypatch.setattr(Path, "read_bytes", lambda self: flaky(self))
     assert agent.read_agent_info(tmp_path) == info
-    assert flaky.calls == 4
+    assert flaky.calls == 5  # agent.json: 3 violations + the read; then the secret file once
 
 
 def test_replace_and_unlink_wait_out_a_transient_sharing_violation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    info = _info()
+    info = _info(tmp_path)
     flaky_replace = Flaky(os.replace, 3)
     monkeypatch.setattr(os, "replace", flaky_replace)
     agent.write_agent_info(tmp_path, info)
@@ -82,7 +84,7 @@ def test_replace_and_unlink_wait_out_a_transient_sharing_violation(
 def test_a_persistent_permission_error_is_still_an_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent.write_agent_info(tmp_path, _info())
+    agent.write_agent_info(tmp_path, _info(tmp_path))
     monkeypatch.setattr(agent, "SHARING_RETRY_WINDOW", 0.05)
     monkeypatch.setattr(Path, "read_bytes", Flaky(Path.read_bytes, 10**9))
     with pytest.raises(PermissionError):
@@ -90,12 +92,14 @@ def test_a_persistent_permission_error_is_still_an_error(
 
 
 def test_failed_write_leaves_no_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    info = _info(tmp_path)
     monkeypatch.setattr(agent, "SHARING_RETRY_WINDOW", 0.05)
     monkeypatch.setattr(os, "replace", Flaky(os.replace, 10**9))
     with pytest.raises(PermissionError):
-        agent.write_agent_info(tmp_path, _info())
+        agent.write_agent_info(tmp_path, info)
     monkeypatch.undo()
-    assert list(tmp_path.iterdir()) == []
+    rdir = agent.runtime_path(tmp_path)
+    assert [p.name for p in rdir.iterdir()] == [agent.SECRET_FILE]  # no leftover *.tmp
 
 
 def test_shutdown_exits_even_if_agent_json_cannot_be_removed(
@@ -103,6 +107,7 @@ def test_shutdown_exits_even_if_agent_json_cannot_be_removed(
 ) -> None:
     exited: list[int] = []
     server = agent.AgentServer(tmp_path, 60, exit_func=exited.append)
+    server.start()  # a record exists, so shutdown really tries to remove it
     monkeypatch.setattr(
         agent, "remove_agent_info", lambda _d: (_ for _ in ()).throw(PermissionError(13, "x"))
     )

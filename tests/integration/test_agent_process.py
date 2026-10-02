@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from nbp_git_safe import agent, crypto
-from tests.helpers import NbpRepo, _kill, populate
+from tests.helpers import NbpRepo, _kill, make_info, populate
 from tests.leak.harness import LeakScanner, _b64_stable, assert_no_leaks
 
 
@@ -119,17 +119,19 @@ def test_key_is_absent_from_disk_agent_json_and_git_dir(make_repo, tmp_path: Pat
     hits += scanner.scan_dir(tmp_path)  # the whole temp tree of the test (work tree included)
     assert_no_leaks(hits)
 
-    data = json.loads(agent.agent_json_path(repo.state_dir).read_text())
+    path = agent.agent_json_path(repo.state_dir)
+    assert not path.is_relative_to(repo.path / ".git")  # the state is outside the repository
+    data = json.loads(path.read_text())
     assert set(data) == {
         "v",
         "address",
         "family",
-        "authkey",
+        "nonce",
         "pid",
         "started",
         "expires_at",
         "idle_timeout",
-    }
+    }  # no authkey: it is derived from agent.secret and the nonce, never written
     assert crypto.encode_key(repo.master) not in json.dumps(data)
 
 
@@ -211,9 +213,7 @@ def test_unlock_cleans_an_orphan_and_starts_fresh(make_repo) -> None:  # type: i
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
     repo.state_dir.mkdir(parents=True, exist_ok=True)
-    orphan = agent.AgentInfo(
-        "stale", "AF_PIPE", os.urandom(32), dead.pid, time.time(), time.time() + 1000, None
-    )
+    orphan = make_info(repo.state_dir, dead.pid, time.time() + 1000)
     agent.write_agent_info(repo.state_dir, orphan)
     assert repo.cli("unlock").code == 0
     assert live_info(repo).pid != dead.pid
@@ -231,7 +231,7 @@ def test_agent_started_by_one_cli_serves_another_and_a_worktree(make_repo, tmp_p
     linked = NbpRepo(other, repo.git, repo.canaries, repo.master)
     linked_status = linked.cli("status")
     assert linked_status.code == 0 and "agent: unlocked" in linked_status.out
-    assert agent.agent_json_path(repo.state_dir).exists()  # the state lives in the common dir
+    assert agent.agent_json_path(repo.state_dir).exists()  # one agent per repository, all worktrees
 
 
 def test_keygen_prints_once_to_stdout_and_stores_nothing(

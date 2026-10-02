@@ -207,11 +207,22 @@ def run_doctor(
     info = None
     try:
         info = agent.read_agent_info(repo.state_dir)
+    except agent.InsecureStateError as exc:
+        add(PROBLEM, f"{exc}; nothing is read from it (check its owner and permissions)")
     except agent.AgentError:
         add(WARN, "agent.json is corrupted (it is removed by the next unlock)")
     if info is not None and (not agent.pid_alive(info.pid) or time.time() >= info.expires_at):
         add(WARN, "agent.json is stale (the agent is gone); the next command removes it")
-    status = unlock.current_status(repo.state_dir) if info is not None else None
+    status = None
+    if info is not None:
+        try:
+            status = unlock.current_status(repo.state_dir)
+        except agent.HandshakeError:
+            add(
+                PROBLEM,
+                "something answers where the agent state points but fails the authentication "
+                "(a planted agent.json?); it is never given the key: run `nbp-git-safe unlock`",
+            )
     if cfg.key_command is None:
         add(
             WARN,

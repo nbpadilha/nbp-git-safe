@@ -46,8 +46,8 @@ attacks on the `cryptography` library itself.
 * **The local object database (adversary 3).** Plain content and real names are never written to
   `.git/objects` by this tool (the invariant is enforced by leak tests on every scenario). The
   stat cache is keyed by an HMAC of the path and holds sizes, times and content MACs only.
-  `agent.json` holds the pipe address, the PID, the expiry and the channel's authentication secret,
-  never the encryption key.
+  The agent's `agent.json` (outside the repository, see "Local channel") holds the pipe address, the
+  PID, the expiry and a public nonce, never the encryption key.
 * **Operator mistakes (adversary 4).** A managed block in `.git/info/exclude` keeps `git add -A`
   away from protected files; `pre-commit` blocks protected paths and, with the agent unlocked,
   renamed or copied content; `pre-push` repeats the checks over every commit being pushed and
@@ -55,10 +55,30 @@ attacks on the `cryptography` library itself.
   that holds protected files and cloud-synced folders. Failure is closed: an unexpected error in a
   hook blocks the commit.
 * **Local channel (adversary 5).** The agent speaks only over a named pipe or a 0700 Unix socket,
-  requires a mutual HMAC-SHA256 handshake with a random per-agent secret before any request, uses
-  length-limited `send_bytes` / `recv_bytes` only (never unpickling), and never returns the key.
-  Windows pipe DACL hardening and remote-client rejection are planned and **not done yet**
-  (see section 5).
+  requires a mutual HMAC-SHA256 handshake before any request, uses length-limited `send_bytes` /
+  `recv_bytes` only (never unpickling), and never returns the key. What makes it hard to hijack
+  (design in `docs/FORMAT.md` section 11):
+  * `agent.json` is not a trust anchor. It lives outside the repository, in a per-user directory
+    (`%LOCALAPPDATA%`, `$XDG_RUNTIME_DIR` or `~/.cache`) that the tool creates and re-verifies on
+    every use (owner, no link/junction, DACL or mode); in a directory that fails the check nothing
+    is read, written or deleted. A planted file therefore cannot make the program delete anything
+    (the only paths ever removed are `agent.json` and a socket at an exactly computed place), nor
+    can it point the client at an arbitrary pipe.
+  * The connection key is not stored: it is `HMAC(agent.secret, nonce)`; an impostor that merely
+    writes an `agent.json` of its own cannot complete the handshake, so it receives neither
+    plaintext (`seal`) nor the master key. `unlock` hands the key only to an agent it started
+    itself (credentials over the child's stdin pipe, reported pid checked), never to one found
+    through a file.
+  * Before sending a byte the client checks the pid and user of the process that serves the
+    connection (`GetNamedPipeServerProcessId`, `SO_PEERCRED`); the Windows pipe has a DACL for the
+    current user only, rejects remote clients, claims its name with `FILE_FLAG_FIRST_PIPE_INSTANCE`
+    and is opened by clients at `SECURITY_IDENTIFICATION`.
+  * The agent process runs `python -I` (no `PYTHON*` variables, no current directory or user site on
+    `sys.path`) with an explicit minimal environment, so a package planted in the temp or the
+    working directory is never imported into the process that holds the key.
+  * Limit: a process running as YOU can read `agent.secret`, read the agent's memory and the
+    plaintext working tree. None of this defends against that (adversary "compromised machine with
+    an unlocked agent", section 4).
 
 ## 4. What it does NOT protect against
 
@@ -108,9 +128,9 @@ attacks on the `cryptography` library itself.
 
 ## 5. Known gaps and planned work
 
-* Windows named-pipe DACL via ctypes and rejection of remote clients (phase 7). Today the pipe name
-  is random per agent and every request needs the authentication secret from `agent.json`, which
-  lives in the repository's `.git` directory with your user's permissions.
+* The POSIX side of the agent hardening (peer-credential checks with `SO_PEERCRED` / macOS
+  `LOCAL_PEERCRED`, the 0700 directory checks) is implemented but has so far only been exercised
+  on Windows 11; it needs a run on Linux and macOS.
 * An external review of the format and the agent. Fuzzing of the index and blob parsers.
 * Blobs are whole files held in memory (limit 64 MiB each); no streaming and no delta compression.
 * No post-quantum consideration: AES-256-based, symmetric.

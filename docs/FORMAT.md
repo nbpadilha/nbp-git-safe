@@ -165,13 +165,49 @@ no `*.nbp-tmp`/`*.nbp-theirs` suffix; paths must not collide case-insensitively 
 and a directory; every path must match the protected set and must not be tracked on the main
 branch. Each decrypted blob must match its entry's `size` and `mac`.
 
-## 11. Agent transport (`agent.json`, handshake, messages)
+## 11. Agent transport (state directory, `agent.json`, handshake, messages)
 
-`<git-common-dir>/nbp-safe/agent.json`: `{v, address, family, authkey (hex, 32 bytes), pid,
-started, expires_at, idle_timeout}`. It never contains the encryption key. The agent listens on a
-named pipe `\.\pipe\nbp-git-safe-<random>` (Windows) or an `AF_UNIX` socket in a private 0700
-directory (POSIX); `multiprocessing.connection` is used with `authkey=None` and only
-`send_bytes`/`recv_bytes(maxlength)` (never `recv`, which unpickles).
+**State directory.** Everything the agent needs to be found lives OUTSIDE the repository, in a
+per-user directory computed by the program (never read from a file):
+`%LOCALAPPDATA%\nbp-git-safe\<repo hash>` on Windows, `$XDG_RUNTIME_DIR/nbp-git-safe/<repo hash>` (or
+`~/.cache/nbp-git-safe/<repo hash>`) on POSIX, where `<repo hash>` is the first 24 hex digits of
+SHA-256 of the canonical path of `<git-common-dir>/nbp-safe`. The directory and its parent are
+created by the tool (Windows: protected DACL, full control for the current user, SYSTEM and
+Administrators only; POSIX: mode 0700) and **re-verified on every use**: not a link or junction,
+owned by the current user (Windows: or Administrators), and no access for anybody else (Windows:
+no allow entry for another account; POSIX: no group/other bits). If the check fails nothing is read
+from it, written to it or deleted from it, and the agent counts as not running.
+
+Files in it: `agent.secret` (32 random bytes, created once with `O_EXCL`, mode 0600), `agent.json`,
+`unlock.lock`, and on POSIX the socket `s-<24 hex>.sock`.
+
+`agent.json`: `{v: 2, address, family, nonce (hex, 32 bytes), pid, started, expires_at,
+idle_timeout}`. It contains **no secret** and never the encryption key. The connection `authkey` is
+derived, not stored: `authkey = HMAC-SHA256(agent.secret, "nbp-git-safe/agent/authkey/v2" || nonce)`.
+`address` must be exactly what the program would have made: a pipe `\\.\pipe\nbp-git-safe-<24 hex>` on
+Windows, a socket that is a direct child of the state directory on POSIX; anything else makes the
+file "corrupted". The only paths the program ever deletes are `agent.json` and a socket that passed
+that check; the content of a file never decides what else is removed.
+
+**Who starts the agent.** The process that runs `unlock` generates the address, the nonce and the
+`authkey` and hands them to the new agent over the agent's own **stdin pipe** (one JSON line); the
+agent answers `READY <pid>` on its stdout pipe. The pid must be the process just started (on
+Windows a venv launcher stub re-executes the interpreter, so a direct child of it is accepted). The
+agent runs with `python -I` (isolated: no `PYTHON*` variables, no user site, no current directory
+on `sys.path`), working directory = the state directory and an explicit minimal environment. The
+master key is delivered only to an agent started this way: an agent that is merely *found* through
+`agent.json` is used for ordinary requests (after the checks below) but never receives the key; a
+locked or unauthenticated one is replaced by a new agent.
+
+**Transport.** Windows: a named pipe created by the tool with `CreateNamedPipeW` (ctypes):
+DACL granting the current user only, `PIPE_REJECT_REMOTE_CLIENTS`, and
+`FILE_FLAG_FIRST_PIPE_INSTANCE` so the name cannot be squatted; clients connect at
+`SECURITY_IDENTIFICATION` (the server cannot impersonate them). POSIX: an `AF_UNIX` socket in the
+0700 directory (mode 0600), the peer's uid is checked on accept and (Linux `SO_PEERCRED`, macOS
+`LOCAL_PEERCRED`) by the client. Before sending a single byte the client checks that the process
+serving the connection is the pid in `agent.json` (Windows `GetNamedPipeServerProcessId`, POSIX
+peer credentials) and belongs to the current user. `multiprocessing.connection` is used with
+`authkey=None` and only `send_bytes`/`recv_bytes(maxlength)` (never `recv`, which unpickles).
 
 Mutual handshake (HMAC-SHA256 keyed with `authkey`, `hmac.compare_digest`):
 

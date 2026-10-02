@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -140,7 +141,27 @@ def make_repo(
 
 
 @pytest.fixture(autouse=True)
-def reap_agents() -> object:
+def private_runtime_root(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """The agent keeps its state in a per-user directory outside the repository; tests get a
+    throw-away base for it (never the developer's real ``%LOCALAPPDATA%``/``$XDG_RUNTIME_DIR``).
+    The environment variable is what hook subprocesses (run by git) see; the module override is
+    what this process uses, so that a test calling ``monkeypatch.undo()`` cannot send the agent to
+    the real directory."""
+    from nbp_git_safe import agent
+
+    root = tmp_path_factory.mktemp("runtime")
+    if sys.platform != "win32":
+        root.chmod(0o700)
+    monkeypatch.setenv("LOCALAPPDATA" if sys.platform == "win32" else "XDG_RUNTIME_DIR", str(root))
+    agent.set_runtime_root(root / agent.RUNTIME_NAME)
+    yield root
+    agent.clear_runtime_root()
+
+
+@pytest.fixture(autouse=True)
+def reap_agents(private_runtime_root: Path) -> object:
     """Never leave a detached agent process behind, whatever the test did."""
     yield
     from tests import helpers

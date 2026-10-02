@@ -167,14 +167,27 @@ def test_spawn_does_not_pass_the_key_in_argv_or_env(
     master_key: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real spawn path: capture what would be handed to the new process."""
+    import io
     import subprocess
 
     seen: dict[str, object] = {}
 
+    class Sink(io.BytesIO):
+        def close(self) -> None:
+            seen["handoff"] = self.getvalue()
+            super().close()
+
     class FakeProc:
         pid = 0
 
-        def poll(self) -> int:
+        def __init__(self) -> None:
+            self.stdin = Sink()
+            self.stdout = io.BytesIO(b"")  # dies before announcing itself
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
             return 1
 
     def fake_popen(argv: list[str], **kwargs: object) -> FakeProc:
@@ -185,17 +198,21 @@ def test_spawn_does_not_pass_the_key_in_argv_or_env(
     with pytest.raises(agent.AgentError, match="failed to start"):
         agent.spawn_agent(tmp_path / "s", 60, 30)
     key_text = crypto.encode_key(master_key)
-    blob = repr(seen)
+    handoff = seen["handoff"]
+    assert isinstance(handoff, bytes) and handoff.endswith(b"\n")  # the endpoint went over stdin
+    blob = repr({k: v for k, v in seen.items() if k != "handoff"}) + repr(handoff)
     for needle in (key_text, master_key.hex(), repr(master_key)):
         assert needle not in blob
     kwargs = seen["kwargs"]
     assert isinstance(kwargs, dict)
-    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["stdin"] == subprocess.PIPE and kwargs["stdout"] == subprocess.PIPE
     assert "NBP_SAFE_TEST_KEY" not in kwargs["env"]  # type: ignore[operator]
+    assert Path(kwargs["cwd"]) == agent.runtime_path(tmp_path / "s")  # type: ignore[arg-type]
     if sys.platform == "win32":
         flags = kwargs["creationflags"]
         assert flags & subprocess.DETACHED_PROCESS and flags & subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     else:
         assert kwargs["start_new_session"] is True
     argv = seen["argv"]
-    assert isinstance(argv, list) and "--idle" in argv and argv[1:3] == ["-m", "nbp_git_safe.agent"]
+    assert isinstance(argv, list) and "--idle" in argv
+    assert argv[1:4] == ["-I", "-m", "nbp_git_safe.agent"]
