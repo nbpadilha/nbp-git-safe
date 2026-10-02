@@ -74,8 +74,14 @@ def tracked_files(git: Git) -> list[str]:
 
 def match_paths(git: Git, repo: Repo, paths: Sequence[str]) -> set[str]:
     """Which of ``paths`` (which need not exist) match the protected set."""
-    files = pattern_files(repo)
-    if not paths or not files:
+    return match_paths_texts(git, [pf.read_bytes() for pf in pattern_files(repo)], paths)
+
+
+def match_paths_texts(git: Git, texts: Sequence[bytes], paths: Sequence[str]) -> set[str]:
+    """Like ``match_paths`` but the pattern sets are given as contents (for example the
+    ``.nbp-safe`` of HEAD or of the index). Each text is evaluated on its own and the results
+    are unioned, so a negation in one can never unprotect what another protects."""
+    if not paths or not texts:
         return set()
     payload = b"".join(p.encode("utf-8", "surrogateescape") + b"\0" for p in paths)
     matched: set[str] = set()
@@ -83,7 +89,9 @@ def match_paths(git: Git, repo: Repo, paths: Sequence[str]) -> set[str]:
         scratch_git = Git(scratch, git.env)
         scratch_git.run("init", "--quiet", "--template=", scratch)
         git_dir = Path(scratch, ".git")
-        for pf in files:
+        for number, text in enumerate(texts):
+            pf = Path(scratch, f"patterns-{number}")
+            pf.write_bytes(text)
             out = scratch_git.run(
                 f"--git-dir={git_dir}",
                 f"--work-tree={scratch}",
@@ -142,24 +150,22 @@ def _split_block(text: str) -> tuple[str, str] | None:
     return text[:begin], text[after:]
 
 
-def _read_exclude(repo: Repo) -> str:
-    path = exclude_path(repo)
+def _read_text(path: Path) -> str:
     try:
         return path.read_bytes().decode("utf-8", "surrogateescape")
     except FileNotFoundError:
         return ""
 
 
-def _write_exclude(repo: Repo, text: str) -> None:
-    path = exclude_path(repo)
+def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(text.encode("utf-8", "surrogateescape"))
 
 
-def install_exclude_block(repo: Repo) -> bool:
-    """Create or update the managed block (idempotent). Returns True if the file changed."""
-    block = render_block(block_lines(repo))
-    current = _read_exclude(repo)
+def _install_block(path: Path, lines: Sequence[str]) -> bool:
+    """Create or update the managed block of ``path`` (idempotent). True if the file changed."""
+    block = render_block(lines)
+    current = _read_text(path)
     parts = _split_block(current)
     if parts is None:
         prefix = current if not current or current.endswith("\n") else current + "\n"
@@ -168,22 +174,65 @@ def install_exclude_block(repo: Repo) -> bool:
         new = parts[0] + block + parts[1]
     if new == current:
         return False
-    _write_exclude(repo, new)
+    _write_text(path, new)
     return True
 
 
-def remove_exclude_block(repo: Repo) -> bool:
+def _remove_block(path: Path) -> bool:
     """Remove the managed block, leaving every other line untouched."""
-    current = _read_exclude(repo)
+    current = _read_text(path)
     parts = _split_block(current)
     if parts is None:
         return False
-    _write_exclude(repo, parts[0] + parts[1])
+    _write_text(path, parts[0] + parts[1])
     return True
 
 
+def install_exclude_block(repo: Repo) -> bool:
+    """Create or update the managed block (idempotent). Returns True if the file changed."""
+    return _install_block(exclude_path(repo), block_lines(repo))
+
+
+def remove_exclude_block(repo: Repo) -> bool:
+    return _remove_block(exclude_path(repo))
+
+
 def has_exclude_block(repo: Repo) -> bool:
-    return _split_block(_read_exclude(repo)) is not None
+    return _split_block(_read_text(exclude_path(repo))) is not None
+
+
+def exclude_block_current(repo: Repo) -> bool:
+    """Is the installed block exactly what ``install_exclude_block`` would write now?"""
+    return render_block(block_lines(repo)) in _read_text(exclude_path(repo))
+
+
+# --------------------------------------------------- optional block in the versioned .gitignore
+
+
+def gitignore_path(repo: Repo) -> Path:
+    return repo.toplevel / ".gitignore"
+
+
+def gitignore_lines(repo: Repo) -> list[str]:
+    """Versioned patterns only (local patterns never go into a versioned file)."""
+    lines: list[str] = []
+    versioned = repo.toplevel / VERSIONED_PATTERNS
+    if versioned.is_file():
+        lines.extend(read_patterns(versioned))
+    lines.extend(MANAGED_SUFFIX_PATTERNS)
+    return lines
+
+
+def install_gitignore_block(repo: Repo) -> bool:
+    return _install_block(gitignore_path(repo), gitignore_lines(repo))
+
+
+def remove_gitignore_block(repo: Repo) -> bool:
+    return _remove_block(gitignore_path(repo))
+
+
+def has_gitignore_block(repo: Repo) -> bool:
+    return _split_block(_read_text(gitignore_path(repo))) is not None
 
 
 def cleanup_tmp(path: Path) -> None:

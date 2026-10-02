@@ -121,6 +121,19 @@ def clone_factory(isolated_git: IsolatedGit, tmp_path: Path) -> Callable[..., Nb
 
 
 @pytest.fixture
+def hooked(env: Env) -> Env:
+    """An initialised repository: exclude block + hooks, agent unlocked, baseline committed (the
+    ``post-commit`` hook sealed the vault)."""
+    result = env.repo.cli("init")
+    assert result.code == 0, result.err
+    env.repo.sh("add", "-A")
+    committed = env.repo.raw("commit", "-q", "-m", "baseline")
+    assert committed.returncode == 0, committed.stderr
+    assert env.has_vault(), "post-commit should have sealed the vault"
+    return env
+
+
+@pytest.fixture
 def unlock_fast() -> Iterator[Callable[[NbpRepo], ThreadAgent]]:
     """Unlock a repository with an in-process agent (no detached process, no keyCommand run).
     The real detached-agent path is covered by ``test_agent_process`` and the full-cycle test."""

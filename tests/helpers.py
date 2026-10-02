@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
 from collections.abc import Sequence
@@ -96,6 +97,12 @@ class NbpRepo:
     def sh(self, *args: str) -> str:
         return self.git.run(*args, cwd=self.path)
 
+    def raw(
+        self, *args: str, env: dict[str, str] | None = None, input: bytes | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """git without raising: ``.returncode`` / ``.stdout`` / ``.stderr``."""
+        return self.git.run_raw(*args, cwd=self.path, env=env, input=input)
+
     def set_config(self, key: str, value: str) -> None:
         self.sh("config", "--local", key, value)
 
@@ -154,8 +161,6 @@ def lock_everything(state_dirs: Sequence[Path]) -> None:
 
 
 def _kill(pid: int) -> None:
-    import subprocess
-
     if sys.platform == "win32":
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],

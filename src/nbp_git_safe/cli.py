@@ -10,10 +10,10 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from nbp_git_safe import __version__, agent, crypto, protect, unlock, vault
+from nbp_git_safe import __version__, agent, crypto, doctor, guard, hooks, protect, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config, ConfigError, load_config
-from nbp_git_safe.gitutil import Git, GitError, Repo, discover
+from nbp_git_safe.gitutil import Git, GitError, Repo, discover, rev_parse
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -82,7 +82,7 @@ def cmd_keygen(_args: argparse.Namespace) -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    repo, _git, _cfg = _context(args)
+    repo, git, cfg = _context(args)
     repo.state_dir.mkdir(parents=True, exist_ok=True)
     changed = protect.install_exclude_block(repo)
     _err(
@@ -90,10 +90,89 @@ def cmd_init(args: argparse.Namespace) -> int:
         + ("installed" if changed else "already up to date")
         + f" ({protect.exclude_path(repo)})"
     )
-    if not (repo.toplevel / protect.VERSIONED_PATTERNS).is_file():
+    if args.gitignore_block:
+        changed = protect.install_gitignore_block(repo)
+        _err(
+            "nbp-git-safe: .gitignore block "
+            + ("installed" if changed else "already up to date")
+            + " (a versioned file: commit it)"
+        )
+    versioned = repo.toplevel / protect.VERSIONED_PATTERNS
+    if not versioned.is_file():
         _err("nbp-git-safe: note: no .nbp-safe file yet; add gitignore-style patterns there")
+    else:
+        for warning in guard.lint_patterns(versioned.read_bytes()):
+            _err(f"nbp-git-safe: warning: {warning}")
+    _adopt_remote_vault(git, cfg)
+    if not args.no_hooks:
+        result = hooks.install_hooks(git, repo, with_shim=args.shim)
+        by_mechanism: dict[str, list[str]] = {}
+        for event, mechanism in result.mechanisms.items():
+            by_mechanism.setdefault(mechanism, []).append(event)
+        for mechanism, events in by_mechanism.items():
+            label = {
+                "config": "git config hooks",
+                "shim": "hook-file shims",
+                "none": "NOT installed",
+            }
+            _err(f"nbp-git-safe: {label[mechanism]}: {', '.join(events)}")
+        for warning in result.warnings:
+            _err(f"nbp-git-safe: warning: {warning}")
     if args.generate_key:
         return cmd_keygen(args)
+    return EXIT_OK
+
+
+def _adopt_remote_vault(git: Git, cfg: Config) -> None:
+    """A vault on origin and no local branch (a fresh clone): track it, so `open` works."""
+    if rev_parse(git, cfg.vault_ref) is not None:
+        return
+    if rev_parse(git, cfg.remote_vault_ref + "^{commit}") is None:
+        return
+    name = cfg.vault_ref.removeprefix("refs/heads/")
+    git.run("branch", "--track", name, cfg.remote_vault_ref.removeprefix("refs/remotes/"))
+    _err(f"nbp-git-safe: created local branch {name} tracking the vault on origin")
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    stdin_text = ""
+    if args.event == "pre-push" and sys.stdin and not sys.stdin.isatty():
+        stdin_text = sys.stdin.read()
+    return hooks.run_hook(args.event, args.hook_args, stdin_text)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    repo, git, cfg = _context(args)
+    findings = doctor.run_doctor(git, repo, cfg)
+    for finding in findings:
+        _out(
+            f"[{finding.level.upper() if finding.level == doctor.PROBLEM else finding.level}] "
+            f"{finding.message}"
+        )
+    problems = sum(1 for f in findings if f.level == doctor.PROBLEM)
+    _out(f"{problems} problem(s)" if problems else "no problems found")
+    return doctor.exit_code(findings)
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    repo, git, _cfg = _context(args)
+    if not args.yes:
+        if not sys.stdin or not sys.stdin.isatty():
+            raise CliError("uninstall asks for confirmation: run it in a terminal or pass --yes")
+        _err(
+            "This removes the nbp-git-safe hooks and the exclude block. Protected files will be "
+            "visible to `git status` / `git add -A` again. The vault branch and your files are "
+            "not touched."
+        )
+        if input("type 'uninstall' to continue: ").strip() != "uninstall":
+            raise CliError("not confirmed; nothing changed")
+    removed = hooks.uninstall_hooks(git)
+    if protect.remove_exclude_block(repo):
+        removed.append("exclude block removed")
+    if protect.remove_gitignore_block(repo):
+        removed.append(".gitignore block removed (a versioned file: commit the change)")
+    for line in removed or ["nothing of ours was installed"]:
+        _out(line)
     return EXIT_OK
 
 
@@ -285,8 +364,19 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     add("keygen", cmd_keygen, "print a new random key once (stdout) and store nothing")
-    p = add("init", cmd_init, "prepare the repository (exclude block)")
+    p = add("init", cmd_init, "prepare the repository (exclude block, hooks, vault branch)")
     p.add_argument("--generate-key", action="store_true", help="also print a new key (stdout only)")
+    p.add_argument(
+        "--gitignore-block",
+        action="store_true",
+        help="also write the managed block into the versioned .gitignore",
+    )
+    p.add_argument(
+        "--shim",
+        action="store_true",
+        help="also install hook-file shims (for clients that ignore hooks set by git config)",
+    )
+    p.add_argument("--no-hooks", action="store_true", help="do not install any hook")
     p = add("unlock", cmd_unlock, "run keyCommand and hand the key to the agent")
     p.add_argument("--ttl", help="agent lifetime, e.g. 8h, 30m (default 8h)")
     p.add_argument("--idle-timeout", dest="idle_timeout", help="lock after this much inactivity")
@@ -309,6 +399,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("rm", cmd_rm, "remove a file from the vault and delete it from the working tree")
     p.add_argument("path")
     p.add_argument("--force", action="store_true", help="even if the local file has unsealed edits")
+    p = add("hook", cmd_hook, "run a hook handler (called by git, not by hand)")
+    p.add_argument("event", choices=hooks.EVENTS)
+    p.add_argument("hook_args", nargs=argparse.REMAINDER)
+    add("doctor", cmd_doctor, "check the setup and print actionable findings")
+    p = add("uninstall", cmd_uninstall, "remove our hooks and exclude block (vault untouched)")
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     return parser
 
 

@@ -93,6 +93,13 @@ def _parse_ref(text: str) -> str:
     return value
 
 
+def is_vault_ref(name: str) -> bool:
+    """Does ``name`` look like a vault branch (``refs/heads/nbp-safe[-suffix]``)?"""
+    return (
+        _REF_RE.match(name) is not None and ".." not in name and not name.endswith((".lock", "."))
+    )
+
+
 def _parse_granularity(text: str) -> int:
     value = text.strip().lower()
     if value in _GRANULARITY_NAMES:

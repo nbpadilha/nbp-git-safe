@@ -41,6 +41,26 @@ class IsolatedGit:
             )
         return proc.stdout.decode("utf-8", "replace")
 
+    def run_raw(
+        self,
+        *args: str,
+        cwd: Path | str | None = None,
+        input: bytes | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run git without raising (hooks block with a non-zero exit); text output."""
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            env={**self.env, **(env or {})},
+            input=input,
+            capture_output=True,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
     def init(self, path: Path, *, bare: bool = False) -> Path:
         path.mkdir(parents=True, exist_ok=True)
         flags = ["--bare"] if bare else []
