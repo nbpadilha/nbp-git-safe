@@ -10,6 +10,7 @@ global/system git config (merge.conflictstyle, commit.gpgsign, ...) by pointing
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Callable
@@ -75,3 +76,54 @@ def git_repo(isolated_git: IsolatedGit, tmp_path: Path) -> Callable[..., Path]:
         return isolated_git.init(tmp_path / name, bare=bare)
 
     return make
+
+
+# ------------------------------------------------------------------ vault/agent fixtures
+# (imports are local so that the leak-harness tests keep working without the package pieces)
+@pytest.fixture
+def master_key(monkeypatch: pytest.MonkeyPatch) -> bytes:
+    """A throw-away key generated for this test only. It reaches ``keycmd.py`` through the
+    environment of the test process; it is never written to disk."""
+    from nbp_git_safe import crypto
+
+    key = crypto.generate_key()
+    monkeypatch.setenv("NBP_SAFE_TEST_KEY", crypto.encode_key(key))
+    return key
+
+
+@pytest.fixture
+def make_repo(
+    isolated_git: IsolatedGit, tmp_path: Path, master_key: bytes
+) -> Callable[..., object]:
+    """Factory ``make_repo(name="work", mode="ok", configure_key=True)`` -> ``NbpRepo``."""
+    import sys
+
+    from tests import helpers
+
+    created: list[Path] = []
+
+    def make(name: str = "work", *, mode: str = "ok", canaries: list[str] | None = None) -> object:
+        path = isolated_git.init(tmp_path / name)
+        repo = helpers.NbpRepo(path, isolated_git, canaries or helpers.new_canaries(), master_key)
+        repo.sh("config", "--local", "user.name", "Test User")
+        repo.sh("config", "--local", "user.email", "test@example.invalid")
+        repo.set_config(
+            "nbp-safe.keyCommand", json.dumps([sys.executable, str(helpers.KEYCMD), mode])
+        )
+        repo.set_config("nbp-safe.ttl", "5m")
+        repo.write(".nbp-safe", helpers.VERSIONED_PATTERNS)
+        created.append(repo.state_dir)
+        return repo
+
+    yield make  # type: ignore[misc]
+    helpers.lock_everything(created)
+
+
+@pytest.fixture(autouse=True)
+def reap_agents() -> object:
+    """Never leave a detached agent process behind, whatever the test did."""
+    yield
+    from tests import helpers
+
+    helpers.lock_everything(list(helpers.STATE_DIRS))
+    helpers.STATE_DIRS.clear()

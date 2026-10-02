@@ -76,8 +76,15 @@ def variants(canary: str) -> dict[str, bytes]:
 class LeakScanner:
     """Scan targets for any of the canaries (in any encoding)."""
 
-    def __init__(self, canaries: Sequence[str], git_env: Mapping[str, str] | None = None) -> None:
-        if not canaries:
+    def __init__(
+        self,
+        canaries: Sequence[str],
+        git_env: Mapping[str, str] | None = None,
+        raw_needles: Mapping[str, bytes] | None = None,
+    ) -> None:
+        """``raw_needles`` are extra literal byte patterns (e.g. the raw bytes of a key and its
+        encodings), reported under the given label; they are searched as-is."""
+        if not canaries and not raw_needles:
             raise ValueError("at least one canary is required")
         self.canaries = list(canaries)
         self._needles: list[tuple[str, str, bytes]] = [
@@ -85,6 +92,7 @@ class LeakScanner:
             for canary in self.canaries
             for name, needle in variants(canary).items()
         ]
+        self._needles += [(label, "raw", needle) for label, needle in (raw_needles or {}).items()]
         self._git_env = dict(git_env) if git_env is not None else dict(os.environ)
 
     # ------------------------------------------------------------------ primitives

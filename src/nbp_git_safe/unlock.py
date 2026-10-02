@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: MIT
+"""``keyCommand`` execution and the unlock/lock/status flow.
+
+The command is an argv list read only from the local ``.git/config`` (see ``config.py``). It runs
+in the foreground CLI process WITHOUT a shell (so interactive prompts such as a password
+manager's biometric dialog can appear), with a timeout, and its stdout must be the base64 of the
+64-byte master key. The key is delivered to the agent over the authenticated channel; it is never
+placed in argv, the environment, a file, a log or an error message.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
+
+from nbp_git_safe import agent, crypto
+
+MAX_KEY_OUTPUT = 4096
+
+
+class KeyCommandError(Exception):
+    """keyCommand could not produce a valid key. Messages never include its output."""
+
+
+def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "win32":
+        with contextlib.suppress(OSError):
+            subprocess.run(  # noqa: S603
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],  # noqa: S607
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+            )
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def run_key_command(argv: Sequence[str], timeout: float) -> bytes:
+    """Run ``argv`` (no shell) and return the validated 64-byte master key."""
+    if not argv:
+        raise KeyCommandError("no keyCommand configured (git config nbp-safe.keyCommand)")
+    kwargs: dict[str, Any] = {}
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - argv list from the local .git/config, no shell
+            list(argv),
+            shell=False,
+            stdout=subprocess.PIPE,
+            **kwargs,
+        )
+    except FileNotFoundError:
+        raise KeyCommandError("keyCommand executable not found") from None
+    except OSError:
+        raise KeyCommandError("keyCommand could not be started") from None
+    timed_out = False
+    out = b""
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tree(proc)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=5)
+    if timed_out:
+        raise KeyCommandError(f"keyCommand timed out after {timeout:g} s")
+    if proc.returncode != 0:
+        raise KeyCommandError(f"keyCommand failed (exit code {proc.returncode})")
+    if len(out) > MAX_KEY_OUTPUT:
+        raise KeyCommandError("keyCommand output is not a valid key")
+    try:
+        return crypto.decode_key(out)
+    except crypto.NbpCryptoError:
+        raise KeyCommandError(
+            "keyCommand output is not a valid key (expected base64 of 64 bytes)"
+        ) from None
+
+
+def current_status(state_dir: Path) -> dict[str, Any] | None:
+    """Status of the live agent, or ``None`` when none is running (orphans are cleaned)."""
+    try:
+        with agent.AgentClient.connect(state_dir) as client:
+            return client.status()
+    except agent.AgentNotRunningError:
+        return None
+
+
+def unlock(
+    state_dir: Path,
+    argv: Sequence[str] | None,
+    *,
+    ttl: float,
+    idle_timeout: float | None,
+    key_timeout: float,
+    spawn: Callable[[Path, float, float | None], agent.AgentInfo] = agent.spawn_agent,
+) -> tuple[bool, dict[str, Any]]:
+    """Unlock the repository. Returns ``(newly_unlocked, agent_status)``.
+
+    Order matters for failing closed: the key command runs (and is validated) BEFORE any agent
+    process exists, so a failing command leaves nothing running."""
+    with agent.unlock_guard(state_dir):
+        existing = current_status(state_dir)
+        if existing is not None and not existing["locked"]:
+            return False, existing
+        if existing is not None:  # a running agent that never received a key: replace it
+            with contextlib.suppress(agent.AgentError), agent.AgentClient.connect(state_dir) as c:
+                c.lock()
+        master = run_key_command(argv or (), key_timeout)
+        status = agent.deliver_key(state_dir, master, ttl, idle_timeout, spawn)
+        return True, status
+
+
+def lock(state_dir: Path) -> bool:
+    """Lock (stop) the agent. Returns False if there was none."""
+    try:
+        client = agent.AgentClient.connect(state_dir)
+    except agent.AgentNotRunningError:
+        agent.cleanup_orphan(state_dir)
+        return False
+    with client:
+        client.lock()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and agent.agent_json_path(state_dir).exists():
+        time.sleep(0.02)
+    return True
