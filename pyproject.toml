@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nbp-git-safe"
+version = "0.0.1"
+description = "Encrypted, name-hiding vault for sensitive files inside a Git repository."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+authors = [{ name = "Nikolas Padilha" }]
+dependencies = ["cryptography==50.0.1"]
+
+[project.scripts]
+nbp-git-safe = "nbp_git_safe.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "coverage==7.16.1",
+  "ruff==0.16.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nbp_git_safe"]
+
+[tool.uv]
+# Absolute date: nothing published after it can be resolved (7-day cooldown
+# before the date of the lock; cryptography 50.0.1 is from 2026-08-25).
+exclude-newer = "2026-09-25T00:00:00Z"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Coverage gate: crypto.py must keep 100% branch coverage (fails the run below that).
+# When running a subset of tests, add --no-cov.
+addopts = "-ra --strict-markers --cov --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["nbp_git_safe"]
+
+[tool.coverage.report]
+# Gate applies to the security-critical module only (more modules join in later phases).
+include = ["*/nbp_git_safe/crypto.py"]
+fail_under = 100
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "S607", "S105", "S106"]
