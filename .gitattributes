@@ -1,1 +1,2 @@
-sensitive_file  filter=crypt diff=crypt merge=crypt
+# Text files use LF in the repository; no filters, no custom diff/merge drivers.
+* text=auto eol=lf
