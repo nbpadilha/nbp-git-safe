@@ -11,6 +11,8 @@
 | Package | License | Use |
 |---------|---------|-----|
 | [cryptography](https://github.com/pyca/cryptography) | Apache-2.0 OR BSD-3-Clause | AES-SIV, HKDF, HMAC primitives (no custom constructions) |
+| [cffi](https://github.com/python-cffi/cffi) (transitive, via `cryptography`) | MIT | C foreign-function interface used by `cryptography`'s bindings |
+| [pycparser](https://github.com/eliben/pycparser) (transitive, via `cffi`; not installed on PyPy) | BSD-3-Clause | C parser used by `cffi` |
 
 ## Development dependencies (not distributed)
 

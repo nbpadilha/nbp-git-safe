@@ -18,6 +18,7 @@ Principles:
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import time
@@ -100,7 +101,10 @@ def record_seen(repo: Repo, ref: str, tip: str) -> None:
     repo.state_dir.mkdir(parents=True, exist_ok=True)
     path = _seen_path(repo)
     tmp = path.with_name(f"{SEEN_FILE}.{secrets.token_hex(4)}.tmp")
-    tmp.write_bytes(json.dumps({"refs": refs}, sort_keys=True).encode("ascii"))
+    with open(tmp, "wb") as handle:
+        handle.write(json.dumps({"refs": refs}, sort_keys=True).encode("ascii"))
+        handle.flush()
+        os.fsync(handle.fileno())
     tmp.replace(path)
 
 
@@ -454,7 +458,7 @@ def merge_vaults(
         _sha, plain = _verified_blob(git, backend, theirs, src, theirs.index.entries[src])
         blobs[nid] = backend.enc_blob(nid, plain, cfg.pad_bucket)
         outcome.merged[nid] = entry
-    merged_index = Index(ours.index.key_id, outcome.merged)
+    merged_index = ours.index.successor(outcome.merged, other_parents=[theirs.index.seq])
     try:
         Index.from_dict(merged_index.to_dict(), bytes.fromhex(ours.index.key_id))
         index_mod.validate_against_protected(merged_index, matcher, protect.tracked_files(git))
@@ -481,6 +485,17 @@ def merge_vaults(
         now=now,
     )
     return commit, outcome
+
+
+def _verify_remote_chain(
+    git: Git, backend: vault.Backend, repo: Repo, cfg: Config, remote: str
+) -> int:
+    """Verify the index chain of a remote vault tip before anything of it is adopted: only the
+    commits this clone has not verified yet when the tip descends from the verified one, the whole
+    history otherwise (a diverged but honest remote). A replayed older index fails here."""
+    known = vault.read_verified(repo).get(cfg.vault_ref)
+    trusted = known[0] if known is not None and is_ancestor(git, known[0], remote) else None
+    return vault.verify_chain(git, backend, remote, trusted=trusted)
 
 
 def sync(
@@ -515,6 +530,8 @@ def sync(
     theirs = vault.load_commit(git, backend, remote)  # authenticates and validates their tip
     local = rev_parse(git, cfg.vault_ref + "^{commit}")
     ours_state = vault.load_commit(git, backend, local) if local is not None else None
+    if local is not None:  # our own tip must not have gone back either
+        vault.check_chain(git, backend, repo, cfg.vault_ref, local, allow_replaced=accept_rewrite)
     if ours_state is not None:
         for e in ours_state.index.entries.values():
             result.known_macs.setdefault(e.path, frozenset())
@@ -522,7 +539,9 @@ def sync(
     if local is None:
         _check_protected(git, repo, theirs.index)
         _verify_adopted(git, backend, theirs, {})
+        seq = _verify_remote_chain(git, backend, repo, cfg, remote)
         git.run("update-ref", "-m", "nbp-safe: sync", cfg.vault_ref, remote, "0" * len(remote))
+        vault.mark_verified(repo, cfg.vault_ref, remote, seq, reset=accept_rewrite)
         result.action, result.commit, result.adopted = (
             "fast-forward",
             remote,
@@ -534,11 +553,17 @@ def sync(
         _check_protected(git, repo, theirs.index)
         assert ours_state is not None
         _verify_adopted(git, backend, theirs, ours_state.files)
+        seq = _verify_remote_chain(git, backend, repo, cfg, remote)
         git.run("update-ref", "-m", "nbp-safe: sync", cfg.vault_ref, remote, local)
+        vault.mark_verified(repo, cfg.vault_ref, remote, seq, reset=accept_rewrite)
         result.action, result.commit = "fast-forward", remote
     else:
         assert ours_state is not None
+        _verify_remote_chain(git, backend, repo, cfg, remote)  # theirs must link up before merging
         commit, outcome = merge_vaults(git, repo, cfg, backend, ours_state, theirs, now=now)
+        if commit is not None:
+            merged_seq = max(ours_state.index.seq, theirs.index.seq) + 1
+            vault.mark_verified(repo, cfg.vault_ref, commit, merged_seq, reset=accept_rewrite)
         result.action, result.commit = "merged", commit
         result.notes.extend(outcome.notes)
         result.conflicts = outcome.conflicts
@@ -702,7 +727,7 @@ def rotate(
             entry.updated,
         )
         del plain
-    new_index = Index(new_keys.key_id.hex(), entries)
+    new_index = Index(new_keys.key_id.hex(), entries, 1, "")  # a new lineage: seq 1, no prev
     commit = vault.build_commit(
         git,
         repo,
@@ -721,6 +746,7 @@ def rotate(
     verified = vault.load_commit(git, check, commit)
     for fid, entry in verified.index.entries.items():
         _verified_blob(git, check, verified, fid, entry)
+    vault.mark_verified(repo, ref, commit, verified.index.seq)
     return RotateResult(ref, commit, len(entries), cfg.vault_ref, state.tip)
 
 
@@ -785,6 +811,8 @@ def purge(
         raise vault.VaultError("no entry with that path exists anywhere in the vault history")
     target_set = set(targets)
     mapping: dict[str, str] = {}
+    new_indexes: dict[str, Index] = {}  # rewritten commit -> its index
+    new_files: dict[str, dict[str, str]] = {}  # rewritten commit -> its tree minus the index
     for sha, parents in order:
         state = states[sha]
         entries = {f: e for f, e in state.index.entries.items() if f not in target_set}
@@ -796,22 +824,33 @@ def purge(
                 and path[len(vault.STORE_PREFIX) :] in target_set
             )
         }
-        index_blob = backend.enc_index(Index(state.index.key_id, entries).to_dict(), cfg.pad_bucket)
-        files[vault.INDEX_PATH] = hash_object(git, index_blob)
-        tree = _write_tree(git, repo, files)
+        body = {path: blob for path, blob in files.items() if path != vault.INDEX_PATH}
         new_parents = list(dict.fromkeys(mapping[p] for p in parents))
         if len(new_parents) == 1:
-            parent_tree = rev_parse(git, new_parents[0] + "^{tree}")
-            if parent_tree == tree:
-                mapping[sha] = new_parents[0]  # the commit only touched purged data: drop it
+            only = new_parents[0]
+            if new_indexes[only].entries == entries and new_files[only] == body:
+                mapping[sha] = only  # the commit only touched purged data: drop it
                 continue
+        first = new_indexes[mapping[parents[0]]] if parents else None
+        new_idx = Index(
+            state.index.key_id,
+            entries,
+            state.index.seq,
+            first.digest() if first is not None else "",
+        )
+        index_blob = backend.enc_index(new_idx.to_dict(), cfg.pad_bucket)
+        files[vault.INDEX_PATH] = hash_object(git, index_blob)
+        tree = _write_tree(git, repo, files)
         stamp = git.text("show", "-s", "--format=%ct", sha).strip() + " +0000"
         message = git.text("show", "-s", "--format=%s", sha).strip() or vault.SEAL_MESSAGE
         env = {**vault.VAULT_IDENT, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
         args = ["-c", "commit.gpgsign=false", "commit-tree", tree, "-m", message]
         for parent in new_parents:
             args += ["-p", parent]
-        mapping[sha] = git.text(*args, extra_env=env).strip()
+        created = git.text(*args, extra_env=env).strip()
+        mapping[sha] = created
+        new_indexes[created] = new_idx
+        new_files[created] = body
     new_tip = mapping[tip]
     rewritten = len({v for v in mapping.values()})
     verified = vault.load_commit(git, backend, new_tip)
@@ -824,6 +863,7 @@ def purge(
     if leftovers:
         raise vault.VaultError("internal error: purged entries are still in the rewritten history")
     git.run("update-ref", "-m", "nbp-safe: purge", cfg.vault_ref, new_tip, tip)
+    vault.mark_verified(repo, cfg.vault_ref, new_tip, verified.index.seq, reset=True)
     markers = read_purge_marker(repo)
     markers[cfg.vault_ref] = tip
     _write_purge_marker(repo, markers)
@@ -839,5 +879,7 @@ def purge_instructions(cfg: Config, result: PurgeResult) -> list[str]:
         lines.append(f"git push --force-with-lease={ref}:{result.remote_tip} {REMOTE} {ref}:{ref}")
     # the remote-tracking ref (updated by the forced push) has a reflog of the old tips as well
     lines.append(f"git reflog expire --expire=now {ref} {cfg.remote_vault_ref}")
-    lines.append("git prune --expire now   # removes ALL unreachable objects of this repository")
+    lines.append(
+        "git gc --prune=now   # repacks and removes ALL unreachable objects, loose or packed"
+    )
     return lines

@@ -126,7 +126,14 @@ points outside `.git` (a versioned or shared directory) gets no shim.
 
 ## Limits (documented, tested)
 
-* `git commit --no-verify` skips `pre-commit`; the exclude block still protects `git add -A`.
+* The exclude block (layer 1) is the lowest-precedence source: a `!` negation in a versioned or
+  global `.gitignore` re-exposes protected files to `git add -A` (and nothing in git can prevent
+  that). Layer 2 (the `pre-commit` path check) is the backstop, and `doctor` lists protected files
+  that git does not ignore. Names in another Unicode form (NFD) are not matched by git's byte
+  comparison either; the guard also matches their NFC/NFD forms, and `.nbp-safe` lint warns about
+  non-ASCII patterns.
+* `git commit --no-verify` skips `pre-commit`; the exclude block still protects `git add -A`
+  (unless a negation defeats it, see above).
   `git add -f <protected>` **plus** `--no-verify` leaks into a local commit. `pre-push` then blocks
   the push when it can see it (always by path; by content with the agent unlocked), and `doctor`
   flags the tracked file. History that was never pushed can be rewritten locally.

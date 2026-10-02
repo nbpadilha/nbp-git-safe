@@ -294,7 +294,7 @@ def test_replaced_remote_history_is_refused(machines: Machines) -> None:
         ".gitattributes": vault.GITATTRIBUTES,
         "README.md": vault.README,
         "nbp-safe/index": crypto.encrypt_index(
-            keys, {"v": 1, "key_id": keys.key_id.hex(), "entries": {}}
+            keys, {"v": 2, "key_id": keys.key_id.hex(), "entries": {}, "seq": 1, "prev": ""}
         ),
     }
     write_vault_commit(forger_repo, files)

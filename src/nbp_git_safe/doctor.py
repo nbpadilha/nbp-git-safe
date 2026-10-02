@@ -17,7 +17,7 @@ from pathlib import Path
 from nbp_git_safe import agent, crypto, guard, hooks, multi, protect, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, split_z
+from nbp_git_safe.gitutil import Git, GitError, Repo, rev_parse, split_z
 
 OK, INFO, WARN, PROBLEM = "ok", "info", "warn", "problem"
 LISTED = 10
@@ -160,11 +160,34 @@ def run_doctor(
     if versioned.is_file():
         for warning in guard.lint_patterns(versioned.read_bytes()):
             add(WARN, warning)
+    if cfg.raised_versioned_keys:
+        add(
+            WARN,
+            f"{len(cfg.raised_versioned_keys)} value(s) in .nbp-safe.config were below the "
+            "privacy floor and were raised (pad.bucket >= 1024, commit.timeGranularity >= 60 s); "
+            "someone may have tried to weaken them",
+        )
     if cfg.ignored_versioned_keys:
         add(
             WARN,
             f"{len(cfg.ignored_versioned_keys)} key(s) in .nbp-safe.config are ignored "
             "(not allowed there)",
+        )
+
+    # --- protected files that git does not ignore (layer 1 defeated by a negation)
+    try:
+        protected_now = protect.list_protected(git, repo)
+        visible = set(split_z(git.run("ls-files", "-z", "-o", "--exclude-standard")))
+        exposed = [path for path in protected_now if path in visible]
+    except GitError as exc:
+        add(PROBLEM, f"could not check whether git ignores the protected files ({exc})")
+        exposed = []
+    if exposed:
+        add(
+            PROBLEM,
+            f"{len(exposed)} protected file(s) are NOT ignored by git (a `!` negation in a "
+            ".gitignore, or a core.excludesFile, re-exposes them): `git add -A` would stage them. "
+            "The commit guard still refuses them, but fix the negation; `git status` shows them",
         )
 
     # --- tracked clear files and stash
@@ -244,6 +267,10 @@ def run_doctor(
         try:
             with agent.AgentClient.connect(repo.state_dir) as backend:
                 state = vault.load_vault(git, backend, cfg, use_remote_fallback=True)
+                if state.tip is not None and state.tip == rev_parse(
+                    git, cfg.vault_ref + "^{commit}"
+                ):
+                    vault.check_chain(git, backend, repo, cfg.vault_ref, state.tip)
             if state.tip is None:
                 add(INFO, "no vault yet (nothing sealed)")
             else:

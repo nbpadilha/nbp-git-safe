@@ -159,15 +159,18 @@ def test_a_tampered_index_is_caught_only_with_the_key(hooked: Env) -> None:
     assert "structurally only" in locked.stderr
 
 
-def test_blob_payload_tampering_is_left_to_open_by_design(hooked: Env) -> None:
+def test_blob_payload_tampering_without_the_key_is_stopped_by_the_index_chain(hooked: Env) -> None:
     """pre-push checks structure and the authenticated index; per-blob authentication is what
-    `open`/`status` do (test_vault_tamper). Pinned so the scope of the guard is explicit."""
+    `open`/`status` do (test_vault_tamper). A keyless tamper reuses the parent's index, whose
+    `seq` then does not increase: since the index chain (review M1) the unlocked push guard
+    refuses it, where it used to pass and be left to `open`."""
     repo = hooked.repo
     files = read_vault(repo)
     write_vault_commit(
         repo, {**files, store_paths(files)[0]: flip(files[store_paths(files)[0]])}, hooked.tip()
     )
-    assert repo.raw("push", "-q", "origin", "nbp-safe").returncode == 0
+    blocked = repo.raw("push", "-q", "origin", "nbp-safe")
+    assert blocked.returncode != 0 and "older than its parent" in blocked.stderr
 
 
 # ----------------------------------------------------------------- vault out of date

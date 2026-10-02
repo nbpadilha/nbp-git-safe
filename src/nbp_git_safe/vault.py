@@ -17,6 +17,7 @@ holds a key.
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
 import secrets
@@ -31,7 +32,15 @@ from typing import Any, Protocol
 from nbp_git_safe import crypto, protect
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, hash_objects, rev_parse
+from nbp_git_safe.gitutil import (
+    Git,
+    GitError,
+    Repo,
+    chunked,
+    hash_objects,
+    is_ancestor,
+    rev_parse,
+)
 from nbp_git_safe.index import Entry, Index, IndexValidationError, normalize_path, validate_path
 from nbp_git_safe.statcache import StatCache, path_key_input
 
@@ -66,6 +75,11 @@ class VaultConflictError(VaultError):
 
 class VaultTamperError(VaultError):
     """The vault does not have the expected shape or its content failed verification."""
+
+
+class VaultRollbackError(VaultTamperError):
+    """The vault went back in time or its history was replaced (a rollback, a replay of an older
+    index, or a chain that does not link up)."""
 
 
 class Backend(Protocol):
@@ -447,11 +461,11 @@ def plan_seal(
             removed_paths.append(path)
     removed_paths.extend(analysis.forgotten)
 
-    new_index = Index(state.index.key_id, entries)
-    if state.tip is not None and new_index.to_dict() == state.index.to_dict():
+    if state.tip is not None and entries == state.index.entries:
         return None
     if state.tip is None and not entries:
         return None
+    new_index = state.index.successor(entries)
     return SealPlan(
         ref=cfg.vault_ref,
         parent=state.tip,
@@ -579,7 +593,130 @@ def seal(
     plan = plan_seal(repo, cfg, backend, analysis, now=now, ask=ask)
     if plan is None:
         return None, analysis, None
-    return commit_plan(git, repo, plan, cfg, now=now), analysis, plan
+    commit = commit_plan(git, repo, plan, cfg, now=now)
+    if commit is not None and _was_verified(repo, plan.ref, plan.parent):
+        mark_verified(repo, plan.ref, commit, plan.new_index.seq)  # our own child of a good tip
+    return commit, analysis, plan
+
+
+# -------------------------------------------------------------- the index chain (rollback)
+
+VERIFIED_FILE = "vault-seq.json"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+
+
+def _verified_path(repo: Repo) -> Path:
+    return repo.state_dir / VERIFIED_FILE
+
+
+def read_verified(repo: Repo) -> dict[str, tuple[str, int]]:
+    """``{vault ref: (tip, seq)}`` of the newest vault tip whose whole chain this clone has
+    verified. Commit ids and numbers only: no names, nothing secret."""
+    try:
+        data = json.loads(_verified_path(repo).read_bytes().decode("ascii"))
+    except (OSError, ValueError):
+        return {}
+    refs = data.get("refs") if isinstance(data, dict) else None
+    out: dict[str, tuple[str, int]] = {}
+    if isinstance(refs, dict):
+        for ref, item in refs.items():
+            if isinstance(item, dict) and isinstance(ref, str):
+                tip, seq = item.get("tip"), item.get("seq")
+                if isinstance(tip, str) and _SHA_RE.match(tip) and isinstance(seq, int):
+                    out[ref] = (tip, seq)
+    return out
+
+
+def mark_verified(repo: Repo, ref: str, tip: str, seq: int, *, reset: bool = False) -> None:
+    """Remember ``tip`` as verified. The recorded number only goes up, unless ``reset`` (an
+    explicit adoption of a replaced history: purge, ``--accept-remote-rewrite``)."""
+    known = read_verified(repo)
+    if not reset and ref in known and known[ref][1] > seq:
+        return
+    known[ref] = (tip, seq)
+    path = _verified_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{VERIFIED_FILE}.{secrets.token_hex(4)}.tmp")
+    payload = {"refs": {r: {"tip": t, "seq": n} for r, (t, n) in sorted(known.items())}}
+    with open(tmp, "wb") as handle:
+        handle.write(json.dumps(payload, sort_keys=True).encode("ascii"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def _was_verified(repo: Repo, ref: str, tip: str | None) -> bool:
+    """Is ``tip`` the verified tip of ``ref`` (a root, ``None``, starts a chain of our own)?"""
+    if tip is None:
+        return ref not in read_verified(repo)
+    return read_verified(repo).get(ref, ("", 0))[0] == tip
+
+
+def verify_chain(git: Git, backend: Backend, tip: str, *, trusted: str | None = None) -> int:
+    """Check the index chain of every commit reachable from ``tip`` (or, with ``trusted``, only
+    those that are not reachable from that already verified tip). The index of each commit is
+    authenticated (it needs the key, so only the owner can have written it) and must say:
+
+    * ``seq`` strictly greater than the ``seq`` of every parent, ``prev`` equal to the digest of
+      the first parent's index; a root commit has ``prev == ""``.
+
+    A commit that replays an older tree under a newer parent (the fast-forward rollback an
+    attacker with push access can make without the key) fails the first rule. Returns the ``seq``
+    of ``tip``."""
+    args = ["rev-list", "--reverse", "--topo-order", "--parents", tip]
+    if trusted is not None:
+        args += ["--not", trusted]
+    rows = [line.split() for line in git.text(*args).splitlines() if line.strip()]
+    indexes: dict[str, Index] = {}
+
+    def index_of(commit: str) -> Index:
+        if commit not in indexes:
+            indexes[commit] = load_commit(git, backend, commit).index
+        return indexes[commit]
+
+    for commit, *parents in rows:
+        idx = index_of(commit)
+        if not parents:
+            if idx.prev != "":
+                raise VaultRollbackError("a root vault commit must not link to an earlier index")
+            continue
+        parent_indexes = [index_of(p) for p in parents]
+        if idx.seq <= max(p.seq for p in parent_indexes):
+            raise VaultRollbackError(
+                "the vault index is older than its parent's (a rollback or a replay)"
+            )
+        if idx.prev != parent_indexes[0].digest():
+            raise VaultRollbackError("the vault index does not link to its parent's index")
+    return index_of(tip).seq
+
+
+def check_chain(
+    git: Git,
+    backend: Backend,
+    repo: Repo,
+    ref: str,
+    tip: str,
+    *,
+    allow_replaced: bool = False,
+) -> int:
+    """Verify ``tip`` against what this clone has verified before. A tip that is behind, or that
+    does not descend from, the verified one is a rollback / replaced history and is refused
+    (``allow_replaced``: the caller is adopting such a history on purpose and calls
+    ``mark_verified(..., reset=True)`` afterwards). Returns the ``seq`` of ``tip``. Records
+    nothing."""
+    known = read_verified(repo).get(ref)
+    trusted: str | None = None
+    if known is not None:
+        if known[0] == tip:
+            return known[1]
+        if is_ancestor(git, tip, known[0]):
+            if not allow_replaced:
+                raise VaultRollbackError("the vault is behind a state this clone has verified")
+        elif is_ancestor(git, known[0], tip):
+            trusted = known[0]
+        elif not allow_replaced:
+            raise VaultRollbackError("the vault history was replaced (it does not descend from it)")
+    return verify_chain(git, backend, tip, trusted=trusted)
 
 
 # ------------------------------------------------------------------------- opening
@@ -611,14 +748,43 @@ def _target_problem(toplevel: Path, rel: str) -> str | None:
     return None
 
 
-def _atomic_write(target: Path, data: bytes, mode: str) -> None:
+TMP_SUFFIX = ".nbp-tmp"
+
+
+def _atomic_write(toplevel: Path, rel: str, data: bytes, mode: str) -> None:
+    """Write ``rel`` (relative to ``toplevel``) through a temporary file in the same directory.
+
+    The destination and every directory on the way are checked for links, junctions and reparse
+    points before the directories are created, after, and once more right before the final
+    rename; the temporary file has a random name and is created with ``O_EXCL`` (and
+    ``O_NOFOLLOW`` where it exists), so a link planted at a guessed name is never opened. The data
+    is flushed to disk before the rename. Raises ``OSError`` when anything is in the way."""
+    if _target_problem(toplevel, rel):
+        raise OSError("blocked")
+    target = toplevel / rel
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".nbp-tmp")
+    if _target_problem(toplevel, rel):
+        raise OSError("blocked")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    for _ in range(8):
+        tmp = target.with_name(f".{secrets.token_hex(6)}{TMP_SUFFIX}")
+        try:
+            fd = os.open(tmp, flags, 0o666)
+        except FileExistsError:
+            continue
+        break
+    else:
+        raise OSError("no free temporary name")
     try:
-        with open(tmp, "wb") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
         if sys.platform != "win32" and mode == "100755":
             os.chmod(tmp, 0o755)  # noqa: S103 - executable bit of a sealed script
+        if _target_problem(toplevel, rel):
+            raise OSError("blocked")
         os.replace(tmp, target)
     except BaseException:
         protect.cleanup_tmp(tmp)
@@ -643,6 +809,8 @@ def open_vault(
     state = load_vault(git, backend, cfg, use_remote_fallback=True)
     if state.tip is None:
         raise VaultError("no vault found (branch nbp-safe does not exist)")
+    seq = check_chain(git, backend, repo, cfg.vault_ref, state.tip)
+    mark_verified(repo, cfg.vault_ref, state.tip, seq)
     protect.install_exclude_block(repo)
     idx = state.index
     try:
@@ -689,13 +857,10 @@ def open_vault(
         rel = entry.path + (".nbp-theirs" if diverged else "")
         target = repo.toplevel / rel
         try:
-            if diverged:
-                if target.exists() and _read(target) == plain:
-                    result.theirs.append(rel)
-                    continue
-                if _target_problem(repo.toplevel, rel):
-                    raise OSError("blocked")
-            _atomic_write(target, plain, entry.mode)
+            if diverged and target.exists() and _read(target) == plain:
+                result.theirs.append(rel)
+                continue
+            _atomic_write(repo.toplevel, rel, plain, entry.mode)
         except OSError:
             result.errors.append(f"{rel}: could not be written")
             continue

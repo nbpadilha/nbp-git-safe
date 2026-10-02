@@ -35,6 +35,11 @@ SCRATCH_PREFIX = "match-"
 STICKY_FILE = "sticky-patterns"
 
 
+def managed_suffix_text() -> bytes:
+    """The temp and conflict suffix patterns as a pattern-file content (for the guard)."""
+    return ("\n".join(MANAGED_SUFFIX_PATTERNS) + "\n").encode("ascii")
+
+
 def sticky_path(repo: Repo) -> Path:
     return repo.state_dir / STICKY_FILE
 

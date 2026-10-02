@@ -20,7 +20,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from nbp_git_safe import agent, crypto
+from nbp_git_safe import agent, crypto, gitutil
 
 MAX_KEY_OUTPUT = 4096
 
@@ -29,11 +29,16 @@ class KeyCommandError(Exception):
     """keyCommand could not produce a valid key. Messages never include its output."""
 
 
+def _taskkill() -> str:
+    root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    return str(Path(root) / "System32" / "taskkill.exe")
+
+
 def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
     if sys.platform == "win32":
         with contextlib.suppress(OSError):
             subprocess.run(  # noqa: S603
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],  # noqa: S607
+                [_taskkill(), "/PID", str(proc.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -54,8 +59,10 @@ def run_key_command(argv: Sequence[str], timeout: float) -> bytes:
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
     try:
+        command = [gitutil.resolve_executable(argv[0]), *argv[1:]]  # never from the cwd
         proc = subprocess.Popen(  # noqa: S603 - argv list from the local .git/config, no shell
-            list(argv),
+            command,
+            env=gitutil.child_env(os.environ),
             shell=False,
             stdout=subprocess.PIPE,
             **kwargs,

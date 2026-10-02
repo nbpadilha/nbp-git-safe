@@ -155,6 +155,7 @@ def test_deleting_the_old_branch_needs_the_typed_confirmation(
 ) -> None:
     repo = hooked.repo
     old_tip = hooked.tip()
+    password_manager_updated(monkeypatch)
     wrong = repo.cli("rotate", "--delete-old", "--confirm", "delete everything")
     assert wrong.code == 1 and 'type exactly "delete nbp-safe"' in wrong.err
     assert wrong.out == "" and repo.sh("for-each-ref", "refs/heads/nbp-safe-*").strip() == ""
@@ -175,7 +176,39 @@ def test_deleting_the_old_branch_needs_the_typed_confirmation(
     monkeypatch.undo()
 
 
-def test_rotate_with_confirm_flag_deletes_the_old_local_branch(hooked: Env) -> None:
+def password_manager_updated(monkeypatch: pytest.MonkeyPatch) -> bytes:
+    """The next ``rotate`` generates a key the test knows, and ``keyCommand`` already returns it
+    (as it does once the user has stored the new key in the password manager item)."""
+    new = crypto.generate_key()
+    monkeypatch.setattr(crypto, "generate_key", lambda: new)
+    monkeypatch.setenv("NBP_SAFE_TEST_KEY", crypto.encode_key(new))
+    return new
+
+
+def test_old_branch_is_kept_while_key_command_still_returns_the_old_key(hooked: Env) -> None:
+    """Review B6: `--delete-old` used to delete at once, before the new key was stored anywhere."""
+    old_tip = hooked.tip()
+    result = hooked.repo.cli("rotate", "--delete-old", "--confirm", "delete nbp-safe")
+    assert result.code == 1 and "still returns another key" in result.err
+    assert "the old branch was kept" in result.err
+    assert hooked.tip() == old_tip  # nothing was deleted
+    assert "refs/heads/nbp-safe-" in hooked.repo.sh("for-each-ref", "--format=%(refname)")
+
+
+def test_old_branch_is_kept_when_key_command_fails(
+    hooked: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_tip = hooked.tip()
+    hooked.repo.sh("config", "--local", "nbp-safe.keyCommand", '["definitely-not-a-program-xyz"]')
+    result = hooked.repo.cli("rotate", "--delete-old", "--confirm", "delete nbp-safe")
+    assert result.code == 1 and "could not be checked" in result.err
+    assert hooked.tip() == old_tip
+
+
+def test_rotate_with_confirm_flag_deletes_the_old_local_branch(
+    hooked: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    password_manager_updated(monkeypatch)
     assert hooked.repo.raw("push", "-q", "origin", "main", "nbp-safe").returncode == 0
     remote_before = remote_refs(hooked)
     result = hooked.repo.cli("rotate", "--delete-old", "--confirm", "delete nbp-safe")

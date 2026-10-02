@@ -141,6 +141,25 @@ def make_repo(
 
 
 @pytest.fixture(autouse=True)
+def system_temp(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """A private system temp directory per test, so that the leak gates can scan it: nothing that
+    names a protected file may be written to the OS temp directory (review B1)."""
+    import tempfile
+
+    from tests import helpers
+
+    temp = tmp_path_factory.mktemp("systemtemp")
+    for var in ("TMP", "TEMP", "TMPDIR"):
+        monkeypatch.setenv(var, str(temp))
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    helpers.SYSTEM_TEMP[:] = [temp]
+    yield temp
+    helpers.SYSTEM_TEMP.clear()
+
+
+@pytest.fixture(autouse=True)
 def private_runtime_root(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Path]:

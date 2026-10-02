@@ -8,19 +8,24 @@ tree: a malicious or corrupted index must never be able to write outside the pro
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-INDEX_VERSION = 1
+from nbp_git_safe import crypto
+
+INDEX_VERSION = 2  # 2: seq and prev (rollback chain), see docs/FORMAT.md section 6
+MAX_SEQ = 1 << 53
 MAX_PATH_LEN = 1024
 MAX_COMPONENT_LEN = 255
 MODES = ("100644", "100755")
 
 _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _MAC_RE = re.compile(r"^[0-9a-f]{64}$")
+_DIGEST_RE = _MAC_RE
 _FORBIDDEN_CHARS = set('<>:"|?*\\')
 _WIN_RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$"}
 _WIN_RESERVED |= {f"com{i}" for i in "123456789¹²³"}
@@ -123,6 +128,8 @@ class Index:
 
     key_id: str
     entries: dict[str, Entry]
+    seq: int = 0  # strictly increasing along the commit chain (0: not written yet)
+    prev: str = ""  # digest of the first parent's index ("" for a root commit)
 
     @classmethod
     def empty(cls, key_id: bytes) -> Index:
@@ -133,12 +140,29 @@ class Index:
             "v": INDEX_VERSION,
             "key_id": self.key_id,
             "entries": {fid: e.to_dict() for fid, e in sorted(self.entries.items())},
+            "seq": self.seq,
+            "prev": self.prev,
         }
+
+    def digest(self) -> str:
+        """SHA-256 of the canonical JSON of this index: what the next commit's ``prev`` holds."""
+        return hashlib.sha256(crypto.canonical_json(self.to_dict())).hexdigest()
+
+    def successor(self, entries: dict[str, Entry], *, other_parents: Iterable[int] = ()) -> Index:
+        """The index of a child commit: same key, new entries, ``seq`` above this one and above
+        every other parent's, ``prev`` pointing at this one."""
+        seq = max(self.seq, *other_parents) + 1 if other_parents else self.seq + 1
+        return Index(self.key_id, entries, seq, self.digest() if self.seq else "")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], expected_key_id: bytes) -> Index:
-        if set(data) != {"v", "key_id", "entries"} or data["v"] != INDEX_VERSION:
+        if set(data) != {"v", "key_id", "entries", "seq", "prev"} or data["v"] != INDEX_VERSION:
             raise IndexValidationError("unsupported index structure")
+        seq, prev = data["seq"], data["prev"]
+        if isinstance(seq, bool) or not isinstance(seq, int) or not 1 <= seq < MAX_SEQ:
+            raise IndexValidationError("invalid sequence number in index")
+        if not isinstance(prev, str) or (prev and _DIGEST_RE.match(prev) is None):
+            raise IndexValidationError("invalid chain link in index")
         if data["key_id"] != expected_key_id.hex():
             raise IndexValidationError("index key_id does not match the key")
         raw_entries = data["entries"]
@@ -150,7 +174,7 @@ class Index:
                 raise IndexValidationError("invalid entry in index")
             entries[fid] = _entry_from_dict(raw)
         check_collisions(e.path for e in entries.values())
-        return cls(data["key_id"], entries)
+        return cls(data["key_id"], entries, seq, prev)
 
     def by_path(self) -> dict[str, str]:
         return {e.path: fid for fid, e in self.entries.items()}

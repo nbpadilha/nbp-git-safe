@@ -42,7 +42,19 @@ attacks on the `cryptography` library itself.
   component, no Windows reserved names, case-collision checks).
 * **Rollback and replacement.** The clone remembers the remote vault tip it last saw; a tip that is
   an ancestor of it (rollback) or unrelated (replaced history) is reported and refused unless you
-  pass `--accept-remote-rewrite`.
+  pass `--accept-remote-rewrite`. Every index also carries an authenticated, strictly increasing
+  `seq` and the digest of its parent's index (`docs/FORMAT.md` section 6), and the clone remembers
+  the newest tip it verified: a fast-forward commit that replays an older encrypted index (which
+  needs no key) fails the chain check and is never opened.
+* **Pattern removal upstream.** A collaborator who removes a pattern from `.nbp-safe` (even from a
+  web UI, where no hook runs) does not unprotect anything here: the clone keeps a sticky memory of
+  every pattern it has seen, the guard also blocks any path of the vault index, `post-merge` warns
+  loudly, and only `unprotect <pattern>` (typed confirmation) forgets one (`docs/GUARD.md`).
+* **Hostile working tree.** `git` and `keyCommand` are resolved to absolute paths outside the
+  current directory (and children get `NoDefaultCurrentDirectoryInExePath=1`); `open` writes through
+  random, exclusively created temporary files and re-checks links and junctions before every
+  write; a versioned `.nbp-safe.config` can only raise `pad.bucket` / `commit.timeGranularity`
+  to their floors and cannot set `onMissing`.
 * **The local object database (adversary 3).** Plain content and real names are never written to
   `.git/objects` by this tool (the invariant is enforced by leak tests on every scenario). The
   stat cache is keyed by an HMAC of the path and holds sizes, times and content MACs only.

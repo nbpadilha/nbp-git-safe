@@ -30,6 +30,32 @@ First public version. Python rewrite of an idea started as a fork of transcrypt 
   lockfile, ruff, tests with the `crypto.py` coverage gate, licence check
   (`scripts/check_licenses.py`).
 
+### Security fixes from the adversarial review (before the first release)
+
+- Guard failed open in a linked worktree (git exports `GIT_DIR` to hooks, the matcher's scratch
+  repository re-initialised the real one and a failed `check-ignore` read as "nothing protected"):
+  clean git environment for auxiliary repositories, any status other than 0/1 fails closed.
+- A planted `agent.json` could make the program delete directories, or point the client at an
+  impostor that received the master key and plaintext: agent state moved to a verified per-user
+  directory, authkey derived from a secret instead of stored, key delivered only to an agent the
+  CLI started itself over a stdin pipe, server pid/user check, Windows pipe with DACL / remote
+  clients rejected / name claim, no `rmtree` driven by file contents.
+- The agent could import a package planted in the temp or current directory: started with
+  `python -I`, state directory as cwd, minimal environment.
+- Removing a pattern upstream silently unprotected files after `git pull`: sticky local pattern
+  memory, `unprotect` command, vault-index paths blocked, loud warning, `doctor` listing.
+- Rollback by a fast-forward commit carrying an older index: authenticated `seq` / `prev` chain
+  (index format version 2) verified on `open`, `sync` and push; local verified-tip state.
+- `open` could write through a symlink at a predictable `*.nbp-tmp` name: random `O_EXCL` temp files,
+  link/junction checks right before the write, fsync before the rename.
+- `pre-push` let a tag of a tree or blob through on a git failure: such refs are walked with
+  `rev-list --objects`, annotated tags followed, and anything that cannot be examined blocks.
+- Hardening: `doctor` reports protected files git does not ignore and values raised to the privacy
+  floors; NFC/NFD path matching; `.nbp-safe.config` cannot weaken padding/rounding or set
+  `onMissing`; executables resolved outside the current directory; conflict/temp files guarded;
+  no names in the OS temp dir; `rotate --delete-old` waits for `keyCommand` to return the new key;
+  purge instructions use `git gc --prune=now`.
+
 ### Fixed
 
 - `agent.json` sharing violations on Windows made `unlock` fail intermittently.

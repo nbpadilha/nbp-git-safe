@@ -469,6 +469,7 @@ def cmd_rotate(args: argparse.Namespace) -> int:
         _out(crypto.encode_key(new_master))
         sys.stdout.flush()
         result = multi.rotate(git, repo, cfg, backend, new_master, name=args.name)
+    new_key_id = crypto.KeySet(new_master).key_id
     del new_master
     short = result.ref.removeprefix("refs/heads/")
     _err(
@@ -482,6 +483,7 @@ def cmd_rotate(args: argparse.Namespace) -> int:
     _err(f"  4. git push origin {short}   (never forced)")
     if args.delete_old:
         _typed_confirmation(expected, args.confirm, "delete the old local vault branch")
+        _prove_new_key(cfg, new_key_id)
         multi.delete_old_vault(git, old_ref, result.old_tip)
         _err(
             f"nbp-git-safe: deleted local {old_ref}. Its objects stay until pruned; the "
@@ -490,6 +492,25 @@ def cmd_rotate(args: argparse.Namespace) -> int:
     else:
         _err("  5. when sure, delete the old branch yourself, or re-run with --delete-old")
     return EXIT_OK
+
+
+def _prove_new_key(cfg: Config, new_key_id: bytes) -> None:
+    """The old branch goes only after ``keyCommand`` is seen to return the NEW key (so the new key
+    really is in the password manager item): in a terminal the user is asked to store it first."""
+    if sys.stdin and sys.stdin.isatty():
+        input("store the NEW key in the password manager item keyCommand reads, then press Enter: ")
+    try:
+        proven = unlock.run_key_command(cfg.key_command or (), cfg.key_command_timeout)
+    except unlock.KeyCommandError as exc:
+        raise CliError(
+            f"the old branch was kept: keyCommand could not be checked ({exc})"
+        ) from None
+    if crypto.KeySet(proven).key_id != new_key_id:
+        raise CliError(
+            "the old branch was kept: keyCommand still returns another key. Store the new key in "
+            "your password manager first; then delete the old branch yourself "
+            "(git update-ref -d <old ref>)"
+        )
 
 
 def cmd_purge(args: argparse.Namespace) -> int:

@@ -42,7 +42,12 @@ def test_precedence_flag_env_gitconfig_versioned(repo_git: tuple[Repo, Git, Isol
         "[pad]\n\tbucket = 1024\n[nbp-safe]\n\tonMissing = remove\n"
     )
     assert load_config(git, repo, env={}).pad_bucket == 1024  # versioned beats default
+    # review M6: onMissing decides whether a locally deleted file leaves the vault, so a versioned
+    # file (a collaborator's commit) cannot set it; only the local config can
+    assert load_config(git, repo, env={}).on_missing == "keep"
+    _set(ig, repo, "nbp-safe.onMissing", "remove")
     assert load_config(git, repo, env={}).on_missing == "remove"
+    ig.run("config", "--local", "--unset", "nbp-safe.onMissing", cwd=repo.toplevel)
     _set(ig, repo, "nbp-safe.padBucket", "2048")
     assert load_config(git, repo, env={}).pad_bucket == 2048  # .git/config beats versioned
     env = {"NBP_SAFE_PADBUCKET": "512"}

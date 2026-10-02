@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,55 @@ GIT_REPO_ENV = (
     "GIT_QUARANTINE_PATH",
 )
 _GIT_REPO_ENV_PREFIXES = ("GIT_PUSH_OPTION_",)
+
+
+NO_CWD_EXE = "NoDefaultCurrentDirectoryInExePath"
+
+
+def resolve_executable(name: str, env: Mapping[str, str] | None = None) -> str:
+    """Absolute path of ``name`` found on ``PATH``, never in the current directory.
+
+    Windows' ``CreateProcess`` (and so ``subprocess``) looks in the CURRENT directory before
+    ``PATH``: a ``git.exe`` planted in a repository's working tree would run instead of git. Empty
+    and relative ``PATH`` entries are skipped, as is any entry that is the current directory. A
+    name that already has a directory part is returned unchanged; when nothing is found the bare
+    name is returned (children still get ``NoDefaultCurrentDirectoryInExePath=1``)."""
+    if os.path.dirname(name):
+        return name
+    source = os.environ if env is None else env
+    cwd = os.path.normcase(os.path.realpath(os.getcwd()))
+    exts = [""]
+    if sys.platform == "win32":
+        exts = [e.lower() for e in source.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+        if os.path.splitext(name)[1].lower() in exts:
+            exts = [""]
+    for entry in source.get("PATH", "").split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        if os.path.normcase(os.path.realpath(entry)) == cwd:
+            continue
+        for ext in exts:
+            candidate = os.path.join(entry, name + ext)
+            if os.path.isfile(candidate) and (
+                sys.platform == "win32" or os.access(candidate, os.X_OK)
+            ):
+                return candidate
+    return name
+
+
+_git_exe: list[str] = []
+
+
+def git_executable() -> str:
+    """The git to run, resolved once (see ``resolve_executable``)."""
+    if not _git_exe:
+        _git_exe.append(resolve_executable("git"))
+    return _git_exe[0]
+
+
+def child_env(env: Mapping[str, str]) -> dict[str, str]:
+    """``env`` plus ``NoDefaultCurrentDirectoryInExePath=1`` for a child process."""
+    return {**env, NO_CWD_EXE: "1"}
 
 
 def clean_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -90,9 +140,9 @@ class Git:
         if extra_env:
             env = {**env, **extra_env}
         proc = subprocess.run(  # noqa: S603 - argv list, no shell
-            ["git", *args],  # noqa: S607 - git is resolved via PATH on purpose
+            [git_executable(), *args],
             cwd=self.cwd,
-            env=env,
+            env=child_env(env),
             input=input,
             capture_output=True,
             check=False,
@@ -114,9 +164,9 @@ class Git:
         """Run git and return ``(exit code, stdout, stderr)`` without raising."""
         env = {**self.env, **extra_env} if extra_env else self.env
         proc = subprocess.run(  # noqa: S603 - argv list, no shell
-            ["git", *args],  # noqa: S607
+            [git_executable(), *args],
             cwd=self.cwd,
-            env=env,
+            env=child_env(env),
             input=input,
             capture_output=True,
             check=False,
@@ -130,9 +180,9 @@ class Git:
     def try_run(self, *args: str, input: bytes | None = None) -> bytes | None:
         """Return stdout, or ``None`` when git exits non-zero."""
         proc = subprocess.run(  # noqa: S603
-            ["git", *args],  # noqa: S607
+            [git_executable(), *args],
             cwd=self.cwd,
-            env=self.env,
+            env=child_env(self.env),
             input=input,
             capture_output=True,
             check=False,
@@ -190,10 +240,10 @@ def hash_objects(git: Git, blobs: Sequence[bytes]) -> list[str]:
         hashlib.sha1(b"blob %d\0" % len(blob) + blob, usedforsecurity=False).hexdigest()
         for blob in blobs
     ]
-    proc = subprocess.Popen(
-        ["git", "fast-import", "--quiet", "--done"],  # noqa: S607 - git is resolved via PATH
+    proc = subprocess.Popen(  # noqa: S603 - argv list, no shell
+        [git_executable(), "fast-import", "--quiet", "--done"],
         cwd=git.cwd,
-        env=git.env,
+        env=child_env(git.env),
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,

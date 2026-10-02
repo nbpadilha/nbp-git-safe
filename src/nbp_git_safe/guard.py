@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -30,7 +31,15 @@ from typing import Protocol
 from nbp_git_safe import crypto, protect, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, optional_blob, rev_parse
+from nbp_git_safe.gitutil import (
+    Git,
+    GitError,
+    Repo,
+    chunked,
+    is_ancestor,
+    optional_blob,
+    rev_parse,
+)
 
 ALLOW_UNPROTECT_ENV = "NBP_SAFE_ALLOW_UNPROTECT"
 VERSIONED_PATTERNS = protect.VERSIONED_PATTERNS
@@ -196,7 +205,16 @@ def pattern_sources(
 
 
 def protected_among(git: Git, sources: Sequence[bytes], paths: Iterable[str]) -> set[str]:
-    return protect.match_paths_texts(git, sources, list(dict.fromkeys(paths)))
+    """Which of ``paths`` are protected. Git compares bytes, so a name in another Unicode form
+    (macOS writes NFD, most patterns are typed NFC) would slip past a pattern: every path is also
+    matched in its NFC and NFD forms, and counts as protected if any form matches."""
+    originals = list(dict.fromkeys(paths))
+    forms = {
+        p: {p, unicodedata.normalize("NFC", p), unicodedata.normalize("NFD", p)} for p in originals
+    }
+    query = sorted({form for variants in forms.values() for form in variants})
+    matched = protect.match_paths_texts(git, sources, query)
+    return {p for p, variants in forms.items() if variants & matched}
 
 
 @dataclass
@@ -356,6 +374,12 @@ def lint_patterns(text: bytes | str) -> list[str]:
                 f"{VERSIONED_PATTERNS} line {number} looks like a person's name; keep patterns "
                 "generic (put personal names in .git/info/nbp-safe)"
             )
+        elif not line.isascii():
+            warnings.append(
+                f"{VERSIONED_PATTERNS} line {number} has non-ASCII characters; git compares "
+                "bytes, so a name in another Unicode form (NFC/NFD) is only caught by the "
+                "commit guard, not by `git add -A`: prefer ASCII globs"
+            )
     return warnings
 
 
@@ -401,6 +425,8 @@ def _check_changes(
     pattern, or is a path of the vault index (a sealed file stays protected even when no pattern
     covers it any more), or (agent unlocked) its content equals protected content. Violations are
     appended to ``report``; returns the ``(path, commit)`` keys that were flagged."""
+    if sources:  # our own temp and conflict files never go to the main branch either
+        sources = [*sources, protect.managed_suffix_text()]
     matched = protected_among(git, sources, (c.path for c in changes)) if sources else set()
     seen: set[tuple[str, str | None]] = set()
     for change in changes:
@@ -648,6 +674,7 @@ def _needs_magic(path: str) -> bool:
 
 def check_vault_ref(
     git: Git,
+    repo: Repo,
     cfg: Config,
     backend: GuardBackend | None,
     update: RefUpdate,
@@ -671,6 +698,10 @@ def check_vault_ref(
         return report
     try:
         state = vault.load_commit(git, backend, update.local_oid)  # type: ignore[arg-type]
+        # the index chain: a replayed older index or a branch that went back is not pushed
+        known = vault.read_verified(repo).get(update.local_ref)
+        trusted = known[0] if known and is_ancestor(git, known[0], update.local_oid) else None
+        vault.verify_chain(git, backend, update.local_oid, trusted=trusted)  # type: ignore[arg-type]
     except (vault.VaultError, crypto.NbpCryptoError) as exc:
         report.violations.append(
             Violation("vault", update.local_oid[:10], f"does not verify: {exc}")
@@ -699,7 +730,7 @@ def check_push(
             continue
         try:
             if is_vault_ref(update.local_ref):
-                report.extend(check_vault_ref(git, cfg, backend, update, remote_name))
+                report.extend(check_vault_ref(git, repo, cfg, backend, update, remote_name))
             else:
                 report.extend(check_code_ref(git, repo, cfg, backend, update, remote_name))
         except GitError:

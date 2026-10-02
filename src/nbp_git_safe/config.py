@@ -150,8 +150,16 @@ _PARSERS: dict[str, Callable[[str], Any]] = {
 VERSIONED_KEYS = {
     "vault.ref": "vaultref",
     "pad.bucket": "padbucket",
-    "nbp-safe.onmissing": "onmissing",
     "commit.timegranularity": "timegranularity",
+}
+# A versioned file can ask for more privacy, never for less: its values are raised to these floors
+# (a collaborator's commit must not weaken padding or timestamp rounding). ``onMissing`` decides
+# whether a file deleted locally is deleted from the vault, so only the local config may set it.
+MIN_VERSIONED_BUCKET = 1024
+MIN_VERSIONED_GRANULARITY = 60
+_VERSIONED_FLOORS = {
+    "padbucket": MIN_VERSIONED_BUCKET,
+    "timegranularity": MIN_VERSIONED_GRANULARITY,
 }
 _ENV_PREFIX = "NBP_SAFE_"
 _LOCAL_ONLY = {"keycommand"}
@@ -170,6 +178,7 @@ class Config:
     auto_push: bool = False
     key_command_timeout: float = DEFAULT_KEY_COMMAND_TIMEOUT
     ignored_versioned_keys: tuple[str, ...] = ()
+    raised_versioned_keys: tuple[str, ...] = ()
 
     @property
     def remote_vault_ref(self) -> str:
@@ -232,11 +241,16 @@ def load_config(
     local = _local_layer(git)
     versioned, ignored = _versioned_layer(git, repo)
     values: dict[str, Any] = {}
+    raised: list[str] = []
     for name, parser in _PARSERS.items():
         layers = [local] if name in _LOCAL_ONLY else [flag_layer, env_layer, local, versioned]
         for layer in layers:
             if name in layer:
                 values[name] = parser(layer[name])
+                floor = _VERSIONED_FLOORS.get(name)
+                if layer is versioned and floor is not None and values[name] < floor:
+                    values[name] = floor
+                    raised.append(name)
                 break
     return Config(
         key_command=values.get("keycommand"),
@@ -250,6 +264,7 @@ def load_config(
         auto_push=values.get("autopush", False),
         key_command_timeout=values.get("keycommandtimeout", DEFAULT_KEY_COMMAND_TIMEOUT),
         ignored_versioned_keys=tuple(ignored),
+        raised_versioned_keys=tuple(raised),
     )
 
 

@@ -26,6 +26,7 @@ VERSIONED_PATTERNS = "reports/\ndata-private/**\n!data-private/keep-public.txt\n
 
 
 STATE_DIRS: list[Path] = []
+SYSTEM_TEMP: list[Path] = []  # the per-test system temp dir (set by the autouse fixture)
 
 
 class ThreadAgent:
@@ -142,6 +143,8 @@ class NbpRepo:
         hits = scanner.scan_git_dir(self.path / ".git")
         for other in others:
             hits += scanner.scan_bare_repo(other)
+        for temp in SYSTEM_TEMP:  # the OS temp directory must not hold names or contents either
+            hits += scanner.scan_dir(temp)
         assert_no_leaks(hits)
 
 

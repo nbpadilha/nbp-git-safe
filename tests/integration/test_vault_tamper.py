@@ -188,7 +188,7 @@ def forged_vault(
             "updated": 0,
         }
         files[f"store/{fid}"] = crypto.encrypt_blob(keys, fid, data)
-    index = {"v": 1, "key_id": keys.key_id.hex(), "entries": index_entries}
+    index = {"v": 2, "key_id": keys.key_id.hex(), "entries": index_entries, "seq": 1, "prev": ""}
     files["nbp-safe/index"] = crypto.encrypt_index(keys, index)
     return write_vault_commit(repo, files)
 
@@ -295,7 +295,7 @@ def test_index_for_another_key_id_is_refused(
 ) -> None:
     clone = clone_of_main(env, clone_factory)
     keys = crypto.KeySet(clone.master)
-    index = {"v": 1, "key_id": "00" * 8, "entries": {}}
+    index = {"v": 2, "key_id": "00" * 8, "entries": {}, "seq": 1, "prev": ""}
     write_vault_commit(
         clone,
         {

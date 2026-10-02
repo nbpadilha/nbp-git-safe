@@ -107,8 +107,21 @@ index_blob = header || AES-SIV-256(k_index).encrypt(frame, AD = [header || "inde
   non-finite numbers. Structural validation of the content (path rules, protected-set membership,
   case collisions, reserved names) belongs to the index module (phase 3) and is applied on top of
   this layer.
-* Planned logical content: `{v, key_id, entries: {file_id: {path, mode, size, mac, created,
-  updated}}}` where `path` is a POSIX-style NFC relative path.
+* Logical content: `{v: 2, key_id, entries: {file_id: {path, mode, size, mac, created, updated}},
+  seq, prev}` where `path` is a POSIX-style NFC relative path.
+* **Chain.** `seq` is an integer (1 to 2^53) and `prev` is `""` or the SHA-256 (hex) of the canonical
+  JSON of the FIRST parent's index. A root commit has `prev == ""`; every other commit has `seq`
+  strictly greater than the `seq` of every parent and `prev` equal to the first parent's digest (a
+  merge: `seq = max(parents) + 1`). Both are inside the authenticated index, so only the key
+  holder can write them. A commit that replays an older tree on top of a newer parent has a
+  `seq` that does not increase and is refused. Version 1 (no `seq`/`prev`) was never published
+  and is not accepted. Purge keeps each `seq` and recomputes `prev` along the rewritten chain;
+  rotate starts a new lineage (`seq` 1).
+* **Local verification state** (`.git/nbp-safe/vault-seq.json`, commit ids and numbers only):
+  the newest vault tip whose chain this clone verified, per vault ref. `open`, `sync`, the
+  hooks, `doctor` and the vault `pre-push` verify the chain (incrementally from that tip, or from
+  the root when it is unknown) and refuse a tip that is behind it or does not descend from it,
+  unless the history is adopted on purpose (`purge`, `--accept-remote-rewrite`).
 
 ## 7. Content MAC
 
@@ -155,7 +168,7 @@ Commits use the fixed message `nbp-safe: seal`, the fixed identity `nbp-safe
 `commit.timeGranularity` (default one hour), always `+0000`. Because AES-SIV is deterministic, sealing
 unchanged content produces the same tree and no commit is created.
 
-Index content validated on `open` (before anything is written): `v == 1`; `key_id` equals the
+Index content validated on `open` (before anything is written): `v == 2`; `seq` and `prev` as in section 6 and the chain verified; `key_id` equals the
 agent's key; every file id is 32 lowercase hex; every entry has exactly `path, mode, size, mac,
 created, updated`; `mode` is `100644` or `100755`; `path` is NFC, relative, `/`-separated, has no
 empty/`.`/`..` component, no control characters or `<>:"|?*\`, no component ending in a dot or
