@@ -159,7 +159,9 @@ def test_open_detects_tampering_and_writes_nothing(
 
 def clone_of_main(env: Env, clone_factory: CloneFactory) -> NbpRepo:
     """A second machine whose remote has only the main branch (patterns present, no vault)."""
-    assert env.repo.cli("init").code == 0  # exclude block first: protected files stay out of main
+    # exclude block first: protected files stay out of main; no hooks, so that committing does not
+    # seal a vault (this remote must have the main branch only)
+    assert env.repo.cli("init", "--no-hooks").code == 0
     env.push()
     return clone_factory(env)
 
