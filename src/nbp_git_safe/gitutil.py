@@ -67,6 +67,24 @@ class Git:
     def text(self, *args: str, **kwargs: object) -> str:
         return self.run(*args, **kwargs).decode("utf-8", "surrogateescape")  # type: ignore[arg-type]
 
+    def run_status(
+        self,
+        *args: str,
+        input: bytes | None = None,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> tuple[int, bytes, bytes]:
+        """Run git and return ``(exit code, stdout, stderr)`` without raising."""
+        env = {**self.env, **extra_env} if extra_env else self.env
+        proc = subprocess.run(  # noqa: S603 - argv list, no shell
+            ["git", *args],  # noqa: S607
+            cwd=self.cwd,
+            env=env,
+            input=input,
+            capture_output=True,
+            check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
     def try_run(self, *args: str, input: bytes | None = None) -> bytes | None:
         """Return stdout, or ``None`` when git exits non-zero."""
         proc = subprocess.run(  # noqa: S603
@@ -113,6 +131,12 @@ def hash_object(git: Git, data: bytes) -> str:
 def rev_parse(git: Git, rev: str) -> str | None:
     out = git.try_run("rev-parse", "--verify", "-q", "--end-of-options", rev)
     return out.decode("ascii").strip() if out else None
+
+
+def is_ancestor(git: Git, ancestor: str, descendant: str) -> bool:
+    """``ancestor`` is reachable from ``descendant`` (a commit is its own ancestor)."""
+    code, _, _ = git.run_status("merge-base", "--is-ancestor", ancestor, descendant)
+    return code == 0
 
 
 def cat_blob(git: Git, spec: str) -> bytes:

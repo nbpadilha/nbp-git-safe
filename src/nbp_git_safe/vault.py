@@ -23,7 +23,7 @@ import secrets
 import stat
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -465,46 +465,70 @@ def plan_seal(
     )
 
 
-def commit_plan(
-    git: Git, repo: Repo, plan: SealPlan, cfg: Config, *, now: float | None = None
+def build_commit(
+    git: Git,
+    repo: Repo,
+    *,
+    ref: str,
+    parents: Sequence[str],
+    expect_old: str | None,
+    base_tree: str | None,
+    index_blob: bytes,
+    blobs: Mapping[str, bytes] | None = None,
+    blob_shas: Mapping[str, str] | None = None,
+    remove_ids: Sequence[str] = (),
+    message: str = SEAL_MESSAGE,
+    granularity: int = 3600,
+    now: float | None = None,
+    date: int | None = None,
 ) -> str | None:
-    """Build the tree/commit with plumbing and move the ref with compare-and-swap.
+    """Build a vault commit with plumbing; move ``ref`` from ``expect_old`` with compare-and-swap.
 
-    Returns the new commit id, or ``None`` if the resulting tree equals the parent's (the
-    deterministic encryption makes identical content produce an identical tree)."""
+    The tree starts from ``base_tree`` (or empty), gets the fixed files, the new index and the
+    blobs (``blobs``: ciphertext to write; ``blob_shas``: objects already in the database), and
+    loses ``remove_ids``. ``date`` pins the commit time (history rewriting); otherwise ``now``
+    rounded down to ``granularity``. Returns the new commit id, or ``None`` when the resulting
+    tree equals ``base_tree`` and the commit would have at most one parent (the deterministic
+    encryption makes identical content produce an identical tree)."""
     repo.state_dir.mkdir(parents=True, exist_ok=True)
     tmp_index = repo.state_dir / f"{TMP_INDEX_PREFIX}{secrets.token_hex(6)}"
     env = {"GIT_INDEX_FILE": str(tmp_index)}
     try:
-        if plan.parent_tree is not None:
-            git.run("read-tree", plan.parent_tree, extra_env=env)
+        if base_tree is not None:
+            git.run("read-tree", base_tree, extra_env=env)
         cacheinfo: list[str] = [
             f"100644,{hash_object(git, GITATTRIBUTES)},.gitattributes",
             f"100644,{hash_object(git, README)},README.md",
-            f"100644,{hash_object(git, plan.index_blob)},{INDEX_PATH}",
+            f"100644,{hash_object(git, index_blob)},{INDEX_PATH}",
         ]
-        for fid, blob in sorted(plan.blobs.items()):
+        for fid, blob in sorted((blobs or {}).items()):
             cacheinfo.append(f"100644,{hash_object(git, blob)},{STORE_PREFIX}{fid}")
+        for fid, sha in sorted((blob_shas or {}).items()):
+            cacheinfo.append(f"100644,{sha},{STORE_PREFIX}{fid}")
         for chunk in chunked(cacheinfo, UPDATE_INDEX_CHUNK):
             args = ["update-index", "--add"]
             for item in chunk:
                 args += ["--cacheinfo", item]
             git.run(*args, extra_env=env)
-        for chunk in chunked([f"{STORE_PREFIX}{fid}" for fid in plan.remove_ids], 100):
+        for chunk in chunked([f"{STORE_PREFIX}{fid}" for fid in remove_ids], 100):
             git.run("update-index", "--force-remove", "--", *chunk, extra_env=env)
         tree = git.text("write-tree", extra_env=env).strip()
-        if plan.parent_tree is not None and tree == plan.parent_tree:
+        if base_tree is not None and tree == base_tree and len(parents) <= 1:
             return None
-        ts = round_time(time.time() if now is None else now, cfg.time_granularity)
-        date = f"{ts} +0000"
-        commit_env = {**VAULT_IDENT, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
-        args = ["-c", "commit.gpgsign=false", "commit-tree", tree, "-m", SEAL_MESSAGE]
-        if plan.parent is not None:
-            args += ["-p", plan.parent]
+        ts = (
+            date
+            if date is not None
+            else round_time(time.time() if now is None else now, granularity)
+        )
+        stamp = f"{ts} +0000"
+        commit_env = {**VAULT_IDENT, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        args = ["-c", "commit.gpgsign=false", "commit-tree", tree, "-m", message]
+        for parent in parents:
+            args += ["-p", parent]
         commit = git.text(*args, extra_env=commit_env).strip()
-        old = plan.parent if plan.parent is not None else "0" * len(commit)
+        old = expect_old if expect_old is not None else "0" * len(commit)
         try:
-            git.run("update-ref", "-m", SEAL_MESSAGE, plan.ref, commit, old, extra_env=commit_env)
+            git.run("update-ref", "-m", message, ref, commit, old, extra_env=commit_env)
         except GitError:
             raise VaultConflictError(
                 "the vault changed while sealing (or the ref could not be updated); "
@@ -514,6 +538,25 @@ def commit_plan(
     finally:
         protect.cleanup_tmp(tmp_index)
         protect.cleanup_tmp(tmp_index.with_name(tmp_index.name + ".lock"))
+
+
+def commit_plan(
+    git: Git, repo: Repo, plan: SealPlan, cfg: Config, *, now: float | None = None
+) -> str | None:
+    """Commit a seal plan (see ``build_commit``)."""
+    return build_commit(
+        git,
+        repo,
+        ref=plan.ref,
+        parents=[plan.parent] if plan.parent is not None else [],
+        expect_old=plan.parent,
+        base_tree=plan.parent_tree,
+        index_blob=plan.index_blob,
+        blobs=plan.blobs,
+        remove_ids=plan.remove_ids,
+        granularity=cfg.time_granularity,
+        now=now,
+    )
 
 
 def seal(
@@ -580,8 +623,18 @@ def _atomic_write(target: Path, data: bytes, mode: str) -> None:
         raise
 
 
-def open_vault(git: Git, repo: Repo, cfg: Config, backend: Backend) -> OpenResult:
+def open_vault(
+    git: Git,
+    repo: Repo,
+    cfg: Config,
+    backend: Backend,
+    known_macs: Mapping[str, frozenset[str]] | None = None,
+) -> OpenResult:
     """Materialize the vault at the real paths. Never overwrites diverging local plaintext.
+
+    ``known_macs`` (``path -> content MACs of versions this clone has already sealed``, given by
+    ``sync``) lets a local file that still equals an OLDER vault version be updated in place: it
+    has no local edits, so it is not "diverging".
 
     Everything is authenticated and validated before the first byte is written; a failure at
     that stage aborts with nothing written."""
@@ -614,13 +667,15 @@ def open_vault(git: Git, repo: Repo, cfg: Config, backend: Backend) -> OpenResul
         diverged = False
         if local.exists():
             st = os.lstat(local)
+            stale = known_macs.get(entry.path, frozenset()) if known_macs else frozenset()
             diverged = True
-            if st.st_size == entry.size:
+            if st.st_size == entry.size or stale:
                 data = _read(local)
-                diverged = data is None or backend.mac(data).hex() != entry.mac
-            if not diverged:
-                result.unchanged += 1
-                continue
+                local_mac = backend.mac(data).hex() if data is not None else None
+                if local_mac == entry.mac:
+                    result.unchanged += 1
+                    continue
+                diverged = local_mac not in stale  # an older sealed version: no local edits
         blob = git.run("cat-file", "blob", state.files[STORE_PREFIX + fid])
         plain = backend.dec_blob(fid, blob)  # raises on tampering / wrong key: nothing written yet
         if backend.mac(plain).hex() != entry.mac or len(plain) != entry.size:
