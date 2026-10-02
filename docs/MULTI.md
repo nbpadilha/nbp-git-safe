@@ -10,8 +10,24 @@ for the remote side. All of them need the agent unlocked (they read or write enc
 git clone <url> && cd <repo>
 nbp-git-safe init        # exclude block, hooks, local branch nbp-safe tracking origin/nbp-safe
 nbp-git-safe unlock      # keyCommand -> agent (RAM only)
-nbp-git-safe open        # real names and files appear; without the key only store/<hex> exist
+nbp-git-safe open        # first time: refuses, and shows the vault's key id, seq and tip
+nbp-git-safe open --confirm-first-adopt   # real names and files appear (see below)
 ```
+
+Without the key only `store/<hex>` exist. **First adoption (trust on first use).** A clone that
+has never verified a vault branch cannot know that the tip it found is the newest one: an older,
+authentic commit of the real history, pushed as the branch by someone with write access, verifies
+under your key too. So the first `open` or `sync` of a branch stops after verifying the chain and
+authenticating the index, and prints the key id, the `seq` and the tip; compare them with
+`nbp-git-safe status` on a machine that already has the vault (same key id, `seq` not lower), then
+repeat with `--confirm-first-adopt`. `init --confirm-first-adopt` (agent unlocked) does the same at
+once. Nothing is recorded as verified (or as "seen" on origin) before that. The hooks never adopt:
+`post-merge` prints the reason. The same confirmation is needed when you point the clone at another
+vault ref yourself (`git config nbp-safe.vaultRef ...`, for example on another machine after
+`rotate`) and when the
+record `.git/nbp-safe/vault-seq.json` is lost; a record that exists but is unreadable stops `open`,
+`sync` and `seal` until it is repaired this way (it is never read as empty). The vault ref is a
+local setting: a `vault.ref` in the versioned `.nbp-safe.config` is ignored and reported.
 
 `git pull` keeps the machine current: the `post-merge` hook merges the vault that was just fetched
 (`sync --no-fetch`, offline) and runs `open`; a local file that still equals an older vault version
@@ -45,9 +61,20 @@ authenticated before it enters our history.
 ids only). A fetch that finds origin's tip to be an **ancestor** of it (a rollback) or **unrelated**
 to it (replaced history) is reported by `status`, `doctor` (a problem) and refused by `sync` unless
 `--accept-remote-rewrite` is given. Pushing your own newer history is an ordinary fast-forward and
-repairs a rolled-back remote. A rewrite by the legitimate owner (`purge`, below) looks the same: on
-the other machines delete the local vault branch and run `init` to adopt the new history;
-`--accept-remote-rewrite` merges and can bring purged data back.
+repairs a rolled-back remote. A rewrite by the legitimate owner (`purge`, below) looks the same.
+On every OTHER machine, after checking with the owner that the rewrite is the purge:
+
+```
+git branch -D nbp-safe                          # drop the local copy of the pre-purge history
+nbp-git-safe sync --accept-remote-rewrite       # fetches, verifies the new chain, adopts it, opens
+git reflog expire --expire=now --all && git gc --prune=now    # the old objects, if you want them gone
+```
+
+`init` is not part of it: it only re-creates a local branch that tracks origin (and records
+nothing); `open` still refuses a history that replaced the one it verified, and `sync
+--accept-remote-rewrite` is what adopts it, whether the branch is deleted or was re-created by
+`init`. If you keep the old local branch instead, the same command **merges** the two histories and
+can bring the purged data back.
 
 ## push
 
@@ -84,7 +111,7 @@ It verifies that no commit of the new history has the entries, then prints what 
 ```
 git push --force-with-lease=refs/heads/nbp-safe:<old remote tip> origin refs/heads/nbp-safe:refs/heads/nbp-safe
 git reflog expire --expire=now refs/heads/nbp-safe refs/remotes/origin/nbp-safe
-git prune --expire now        # removes ALL unreachable objects of this repository
+git gc --prune=now            # repacks and removes ALL unreachable objects, loose or packed
 ```
 
 The tool does not run any of them. Until the forced push, `sync` refuses to run (it would merge the

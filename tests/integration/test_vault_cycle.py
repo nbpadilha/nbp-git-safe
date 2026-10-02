@@ -81,7 +81,7 @@ def test_full_cycle_init_unlock_seal_push_clone_unlock_open(
     assert listing.code == 0
     for rel in files:
         assert rel in listing.out
-    opened = clone.cli("open")
+    opened = clone.cli("open", "--confirm-first-adopt")
     assert opened.code == 0 and "4 written" in opened.out, opened.err
     for rel, content in files.items():
         assert clone.read(rel) == content.encode("utf-8")
@@ -290,7 +290,7 @@ def test_names_with_accents_and_spaces_roundtrip(env: Env, clone_factory: CloneF
     assert any("relatório final" in p for p in env.entries())
     clone = clone_factory(env)
     assert clone.cli("unlock").code == 0
-    assert clone.cli("open").code == 0
+    assert clone.cli("open", "--confirm-first-adopt").code == 0
     for rel, data in protected_files(env).items():
         assert clone.read(rel) == data
     assert clone.sh("status", "--porcelain").strip() == ""
@@ -329,7 +329,7 @@ def test_autocrlf_true_changes_nothing(env: Env, clone_factory: CloneFactory) ->
     clone.set_config("core.autocrlf", "true")
     clone.write(".gitattributes", "*.txt text eol=crlf\n")
     assert clone.cli("unlock").code == 0
-    assert clone.cli("open").code == 0
+    assert clone.cli("open", "--confirm-first-adopt").code == 0
     assert clone.read("reports/crlf-test.txt") == payload  # not a single byte altered
     assert not spy.exists() and not (clone.path / "spy-marker").exists()  # no filter ever ran
     refused = clone.cli("seal")  # a vault exists on origin: never start an unrelated second one
@@ -491,7 +491,7 @@ def test_open_never_overwrites_diverging_plaintext(env: Env, clone_factory: Clon
     assert clone.cli("unlock").code == 0
     target = next(p for p in protected_files(env) if p.endswith(".csv"))
     clone.write(target, "my own local version\n")
-    opened = clone.cli("open")
+    opened = clone.cli("open", "--confirm-first-adopt")
     assert opened.code == 0 and f"{target}.nbp-theirs" in opened.err
     assert clone.read(target) == b"my own local version\n"  # untouched
     assert clone.read(f"{target}.nbp-theirs") == env.repo.read(target)
@@ -513,7 +513,7 @@ def test_open_reports_blocked_paths_without_aborting(env: Env, clone_factory: Cl
     clone = clone_factory(env)
     assert clone.cli("unlock").code == 0
     clone.write("reports", "a file where a directory is needed")
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "in the way" in result.err
     assert (clone.path / "data-private" / "plain.bin").exists()  # other entries were written
     assert clone.read("reports") == b"a file where a directory is needed"
@@ -532,7 +532,7 @@ def test_open_refuses_to_follow_links(
         os.symlink(outside, clone.path / "reports", target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not permitted here")
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "link" in result.err
     assert list(outside.iterdir()) == []  # nothing escaped through the link
 
@@ -756,7 +756,7 @@ def test_disk_full_while_opening_leaves_no_partial_files(
         real_write_bytes(src, dst)  # type: ignore[arg-type]
 
     monkeypatch.setattr(vault.os, "replace", failing_replace)
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "could not be written" in result.err
     assert not (clone.path / victim).exists()
     assert not list(clone.path.rglob("*.nbp-tmp"))  # the temp file was cleaned up

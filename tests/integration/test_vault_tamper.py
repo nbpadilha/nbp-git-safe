@@ -148,7 +148,7 @@ def test_open_detects_tampering_and_writes_nothing(
     clone = clone_factory(env)
     unlock_fast(clone)
     before = snapshot(clone.path)
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1, (name, result.out)
     assert "error" in result.err
     assert snapshot(clone.path) == before  # nothing materialized, not even temp files
@@ -227,7 +227,7 @@ def test_forged_index_with_evil_path_is_refused(
     unlock_fast(clone)
     before = snapshot(clone.path)
     outside = clone.path.parent / "escape.txt"
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "error" in result.err, name
     expected = (
         "outside the protected set" if name == "outside-protected-set" else "failed validation"
@@ -248,9 +248,9 @@ def test_forged_index_case_collision_and_file_dir_conflict_refused(
         {"a" * 32: ("reports/Dup.txt", b"1"), "b" * 32: ("reports/dup.TXT", b"2")},
     )
     unlock_fast(clone)
-    assert clone.cli("open").code == 1
+    assert clone.cli("open", "--confirm-first-adopt").code == 1
     forged_vault(clone, {"a" * 32: ("reports/x", b"1"), "b" * 32: ("reports/x/y", b"2")})
-    assert clone.cli("open").code == 1
+    assert clone.cli("open", "--confirm-first-adopt").code == 1
     assert not (clone.path / "reports").exists()
 
 
@@ -268,7 +268,7 @@ def test_forged_tracked_path_is_refused(
     clone = clone_of_main(env, clone_factory)
     forged_vault(clone, {"a" * 32: ("tracked-doc.txt", b"overwritten!")})
     unlock_fast(clone)
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "tracked on the main branch" in result.err
     assert clone.read("tracked-doc.txt") == b"versioned normally"
 
@@ -285,7 +285,7 @@ def test_blob_that_does_not_match_the_authenticated_index_is_refused(
         mac_of={"a" * 32: b"what the index claims"},
     )
     unlock_fast(clone)
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "does not match the authenticated index" in result.err
     assert not (clone.path / "reports").exists()
 
@@ -305,7 +305,7 @@ def test_index_for_another_key_id_is_refused(
         },
     )
     unlock_fast(clone)
-    assert clone.cli("open").code == 1
+    assert clone.cli("open", "--confirm-first-adopt").code == 1
 
 
 def test_valid_forged_vault_with_good_paths_is_opened(
@@ -317,7 +317,7 @@ def test_valid_forged_vault_with_good_paths_is_opened(
     clone = clone_of_main(env, clone_factory)
     forged_vault(clone, {"c" * 32: ("reports/ok file.txt", b"fine")})
     unlock_fast(clone)
-    assert clone.cli("open").code == 0
+    assert clone.cli("open", "--confirm-first-adopt").code == 0
     assert clone.read("reports/ok file.txt") == b"fine"
 
 
@@ -326,7 +326,7 @@ def test_open_without_any_vault(
 ) -> None:
     clone = clone_of_main(env, clone_factory)
     unlock_fast(clone)
-    result = clone.cli("open")
+    result = clone.cli("open", "--confirm-first-adopt")
     assert result.code == 1 and "no vault" in result.err
 
 

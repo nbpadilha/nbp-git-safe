@@ -93,7 +93,21 @@ def test_key_command_only_from_local_git_config(repo_git: tuple[Repo, Git, Isola
     )
     cfg = load_config(git, repo, env={"NBP_SAFE_KEYCOMMAND": '["evil"]'})
     assert cfg.key_command is None
-    assert set(cfg.ignored_versioned_keys) == {"nbp-safe.keycommand", "core.hookspath"}
+    # vault.ref joined the ignored keys in the second review (it used to be honoured)
+    assert set(cfg.ignored_versioned_keys) == {"nbp-safe.keycommand", "core.hookspath", "vault.ref"}
+
+
+def test_vault_ref_is_a_local_option_only(repo_git: tuple[Repo, Git, IsolatedGit]) -> None:
+    repo, git, ig = repo_git
+    (repo.toplevel / ".nbp-safe.config").write_text("[vault]\n\tref = refs/heads/nbp-safe-x\n")
+    cfg = load_config(git, repo, env={})
+    assert cfg.vault_ref == "refs/heads/nbp-safe" and "vault.ref" in cfg.ignored_versioned_keys
+    _set(ig, repo, "nbp-safe.vaultRef", "refs/heads/nbp-safe-2026")  # the local decision
+    assert load_config(git, repo, env={}).vault_ref == "refs/heads/nbp-safe-2026"
+    flagged = load_config(git, repo, {"vaultref": "refs/heads/nbp-safe-y"}, env={})
+    assert flagged.vault_ref == "refs/heads/nbp-safe-y"
+    from_env = load_config(git, repo, env={"NBP_SAFE_VAULTREF": "refs/heads/nbp-safe-z"})
+    assert from_env.vault_ref == "refs/heads/nbp-safe-z"
 
 
 def test_repr_hides_key_command(repo_git: tuple[Repo, Git, IsolatedGit]) -> None:

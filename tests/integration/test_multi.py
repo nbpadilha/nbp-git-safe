@@ -41,7 +41,7 @@ def machines(
     b = clone_factory(hooked)
     assert b.cli("init").code == 0
     agent_b = unlock_fast(b)
-    assert b.cli("open").code == 0
+    assert b.cli("open", "--confirm-first-adopt").code == 0
     return Machines(hooked, hooked.repo, b, agent_b)
 
 
@@ -233,7 +233,7 @@ def test_clone_on_another_machine_with_a_real_agent_reconstructs_the_names(
     assert fresh.cli("open").code == 3  # locked: fails closed, nothing materialized
     assert not (fresh.path / "reports").exists()
     assert fresh.cli("unlock").code == 0  # the real detached agent + keyCommand
-    opened = fresh.cli("open")
+    opened = fresh.cli("open", "--confirm-first-adopt")
     assert opened.code == 0 and "4 written" in opened.out, opened.err
     assert protected_map(fresh) == protected_map(a)
     assert fresh.cli("lock").code == 0

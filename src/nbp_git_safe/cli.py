@@ -30,6 +30,10 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_LOCKED = 3
+ADOPT_HELP = (
+    "adopt a vault branch this clone has never verified (trust on first use: the error shows "
+    "its key id, seq and tip first; compare them with another machine)"
+)
 
 
 class CliError(Exception):
@@ -58,7 +62,13 @@ def _context(args: argparse.Namespace) -> tuple[Repo, Git, Config]:
         "padbucket": getattr(args, "pad_bucket", None),
         "vaultref": getattr(args, "vault_ref", None),
     }
-    return repo, git, load_config(git, repo, flags)
+    cfg = load_config(git, repo, flags)
+    if "vault.ref" in cfg.ignored_versioned_keys:
+        _err(
+            "nbp-git-safe: warning: vault.ref in .nbp-safe.config is ignored; which vault branch "
+            "this clone trusts is local: git config nbp-safe.vaultRef <ref>"
+        )
+    return repo, git, cfg
 
 
 def _connect(repo: Repo) -> agent.AgentClient:
@@ -114,7 +124,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         for warning in guard.lint_patterns(versioned.read_bytes()):
             _err(f"nbp-git-safe: warning: {warning}")
-    _adopt_remote_vault(git, repo, cfg)
+    _adopt_remote_vault(git, repo, cfg, confirm=args.confirm_first_adopt)
     if not args.no_hooks:
         result = hooks.install_hooks(git, repo, with_shim=args.shim)
         by_mechanism: dict[str, list[str]] = {}
@@ -140,18 +150,42 @@ def cmd_init(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _adopt_remote_vault(git: Git, repo: Repo, cfg: Config) -> None:
-    """A vault on origin and no local branch (a fresh clone): track it, so `open` works."""
+def _adopt_remote_vault(git: Git, repo: Repo, cfg: Config, *, confirm: bool = False) -> None:
+    """A vault on origin and no local branch (a fresh clone): track it, so `open` works.
+
+    Nothing is recorded as verified or seen here: the branch is only a pointer until an operation
+    with the key checks its chain (``open``/``sync`` with ``--confirm-first-adopt``). With
+    ``confirm`` the agent must be unlocked: the chain and the authentication are verified first
+    and only then is the tip recorded."""
     if rev_parse(git, cfg.vault_ref) is not None:
         return
     if rev_parse(git, cfg.remote_vault_ref + "^{commit}") is None:
         return
     name = cfg.vault_ref.removeprefix("refs/heads/")
     git.run("branch", "--track", name, cfg.remote_vault_ref.removeprefix("refs/remotes/"))
-    tip = rev_parse(git, cfg.vault_ref + "^{commit}")
-    if tip is not None:
-        multi.record_seen(repo, cfg.vault_ref, tip)
     _err(f"nbp-git-safe: created local branch {name} tracking the vault on origin")
+    tip = rev_parse(git, cfg.vault_ref + "^{commit}")
+    if tip is None:
+        return
+    if not confirm:
+        _err(
+            "nbp-git-safe: the vault is not adopted yet: unlock, then `nbp-git-safe open` shows "
+            "its key id, seq and tip; compare them with another machine and repeat with "
+            "--confirm-first-adopt"
+        )
+        return
+    try:
+        with _connect(repo) as backend:
+            seq = vault.check_chain(git, backend, repo, cfg.vault_ref, tip, adopt=True)
+    except agent.AgentError:
+        raise CliError(
+            "--confirm-first-adopt needs the unlocked agent (the chain and the authentication "
+            "are verified first): run `nbp-git-safe unlock`, then init again",
+            EXIT_LOCKED,
+        ) from None
+    vault.mark_verified(repo, cfg.vault_ref, tip, seq, reset=True)
+    multi.record_seen(repo, cfg.vault_ref, tip)
+    _err(f"nbp-git-safe: adopted {name} @ {tip[:10]} (verified, seq {seq})")
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
@@ -343,7 +377,14 @@ def _report_seal(commit: str | None, analysis: vault.Analysis, plan: vault.SealP
 def cmd_open(args: argparse.Namespace) -> int:
     repo, git, cfg = _context(args)
     with _connect(repo) as backend:
-        result = vault.open_vault(git, repo, cfg, backend)
+        result = vault.open_vault(git, repo, cfg, backend, adopt=args.confirm_first_adopt)
+    if (
+        args.confirm_first_adopt
+    ):  # the adopted tip is verified now: it is also the tip "seen" on origin
+        remote = rev_parse(git, cfg.remote_vault_ref + "^{commit}")
+        adopted = rev_parse(git, cfg.vault_ref + "^{commit}") or remote
+        if remote is not None and remote == adopted and cfg.vault_ref not in multi.read_seen(repo):
+            multi.record_seen(repo, cfg.vault_ref, remote)
     _out(f"opened: {len(result.written)} written, {result.unchanged} unchanged")
     for rel in result.theirs:
         _err(f"nbp-git-safe: local file differs; vault version saved as {rel!r}")
@@ -442,6 +483,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             backend,
             fetch=not args.no_fetch,
             accept_rewrite=args.accept_remote_rewrite,
+            confirm_adopt=args.confirm_first_adopt,
         )
         for note in result.notes:
             _err(f"nbp-git-safe: note: {note}")
@@ -451,7 +493,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         extra = f", {result.conflicts} conflict(s) kept as copies" if result.conflicts else ""
         _out(f"sync: {result.action}{detail}{extra}")
         if not args.no_open and rev_parse(git, cfg.vault_ref + "^{commit}"):
-            opened = vault.open_vault(git, repo, cfg, backend, result.known_macs)
+            opened = vault.open_vault(
+                git, repo, cfg, backend, result.known_macs, adopt=args.confirm_first_adopt
+            )
             _out(f"opened: {len(opened.written)} written, {opened.unchanged} unchanged")
             for rel in opened.theirs:
                 _err(f"nbp-git-safe: local file differs; vault version saved as {rel!r}")
@@ -602,6 +646,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-hooks", action="store_true", help="do not install any hook")
     p.add_argument(
+        "--confirm-first-adopt",
+        action="store_true",
+        help="verify (agent unlocked) and adopt the vault found on origin of a fresh clone",
+    )
+    p.add_argument(
         "--auto-push",
         action="store_true",
         help="make a plain `git push` carry the vault branch (sets remote.origin.push)",
@@ -614,7 +663,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("seal", cmd_seal, "seal protected files into the vault branch")
     p.add_argument("--on-missing", dest="on_missing", choices=["keep", "remove", "ask"])
     p.add_argument("--pad-bucket", dest="pad_bucket")
-    add("open", cmd_open, "materialize vault files at their real paths")
+    p = add("open", cmd_open, "materialize vault files at their real paths")
+    p.add_argument("--confirm-first-adopt", action="store_true", help=ADOPT_HELP)
     add("ls", cmd_ls, "list files in the vault")
     p = add("log", cmd_log, "history of one file")
     p.add_argument("path")
@@ -629,6 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--force", action="store_true", help="even if the local file has unsealed edits")
     p = add("sync", cmd_sync, "fetch, merge (three-way, no force) and open the vault")
+    p.add_argument("--confirm-first-adopt", action="store_true", help=ADOPT_HELP)
     p.add_argument("--no-fetch", action="store_true", help="merge what was already fetched")
     p.add_argument("--no-open", action="store_true", help="do not materialize files afterwards")
     p.add_argument(

@@ -493,9 +493,26 @@ def _verify_remote_chain(
     """Verify the index chain of a remote vault tip before anything of it is adopted: only the
     commits this clone has not verified yet when the tip descends from the verified one, the whole
     history otherwise (a diverged but honest remote). A replayed older index fails here."""
-    known = vault.read_verified(repo).get(cfg.vault_ref)
+    known = vault.read_verified(repo, strict=False).get(cfg.vault_ref)  # callers gated it already
     trusted = known[0] if known is not None and is_ancestor(git, known[0], remote) else None
     return vault.verify_chain(git, backend, remote, trusted=trusted)
+
+
+def _gate_first_adoption(
+    git: Git, backend: vault.Backend, repo: Repo, cfg: Config, tip: str, confirmed: bool
+) -> bool:
+    """Adopting a vault branch this clone has never verified needs the owner's confirmation (trust
+    on first use). Returns True when it is a first adoption that was confirmed (the caller records
+    it as a reset), False when the branch is already known; raises ``AdoptionRequiredError``
+    (naming key id, seq and tip) otherwise."""
+    if cfg.vault_ref in vault.read_verified(repo, strict=not confirmed):
+        return False
+    seq = vault.verify_chain(git, backend, tip)
+    if not confirmed:
+        raise vault.AdoptionRequiredError(
+            vault.adoption_message(git, backend, cfg.vault_ref, tip, seq)
+        )
+    return True
 
 
 def sync(
@@ -507,16 +524,27 @@ def sync(
     fetch: bool = True,
     seal_first: bool = True,
     accept_rewrite: bool = False,
+    confirm_adopt: bool = False,
     now: float | None = None,
 ) -> SyncResult:
-    """Seal local changes, fetch, then fast-forward or three-way merge. Never forces anything."""
+    """Seal local changes, fetch, then fast-forward or three-way merge. Never forces anything.
+    A vault branch this clone has never verified is adopted only with ``confirm_adopt``."""
     protect.install_exclude_block(repo)
     result = SyncResult("up-to-date")
     if purge_pending(git, repo, cfg):  # before sealing: nothing may change until the owner pushes
         raise RemoteRewriteError(remote_status(git, repo, cfg).message)
-    if seal_first:
+    fetched: bool | None = None
+    if fetch and rev_parse(git, cfg.vault_ref + "^{commit}") is None:
+        fetched = fetch_vault(git, cfg)  # no local branch to seal into: look at origin first
+    adopting = (
+        rev_parse(git, cfg.vault_ref + "^{commit}") is None
+        and rev_parse(git, cfg.remote_vault_ref + "^{commit}") is not None
+    )
+    if seal_first and not adopting:  # (a deleted local branch is re-adopted, sealing comes after)
         result.sealed, _analysis, _plan = vault.seal(git, repo, cfg, backend, now=now)
-    if fetch and not fetch_vault(git, cfg):
+    if fetch and fetched is None:
+        fetched = fetch_vault(git, cfg)
+    if fetched is False:
         result.notes.append("origin has no vault branch yet")
     remote = rev_parse(git, cfg.remote_vault_ref + "^{commit}")
     if remote is None:
@@ -531,17 +559,28 @@ def sync(
     local = rev_parse(git, cfg.vault_ref + "^{commit}")
     ours_state = vault.load_commit(git, backend, local) if local is not None else None
     if local is not None:  # our own tip must not have gone back either
-        vault.check_chain(git, backend, repo, cfg.vault_ref, local, allow_replaced=accept_rewrite)
+        first = confirm_adopt and cfg.vault_ref not in vault.read_verified(repo, strict=False)
+        seq_local = vault.check_chain(
+            git, backend, repo, cfg.vault_ref, local, allow_replaced=accept_rewrite, adopt=first
+        )
+        if first or accept_rewrite:
+            # an explicit adoption (first use, or a history the owner knows was rewritten): the
+            # local tip, which verified, is the new record (this is also what makes a branch that
+            # `init` created from a purged remote usable)
+            vault.mark_verified(repo, cfg.vault_ref, local, seq_local, reset=True)
     if ours_state is not None:
         for e in ours_state.index.entries.values():
             result.known_macs.setdefault(e.path, frozenset())
             result.known_macs[e.path] |= {e.mac}
     if local is None:
+        first_adoption = _gate_first_adoption(git, backend, repo, cfg, remote, confirm_adopt)
         _check_protected(git, repo, theirs.index)
         _verify_adopted(git, backend, theirs, {})
         seq = _verify_remote_chain(git, backend, repo, cfg, remote)
         git.run("update-ref", "-m", "nbp-safe: sync", cfg.vault_ref, remote, "0" * len(remote))
-        vault.mark_verified(repo, cfg.vault_ref, remote, seq, reset=accept_rewrite)
+        vault.mark_verified(
+            repo, cfg.vault_ref, remote, seq, reset=accept_rewrite or first_adoption
+        )
         result.action, result.commit, result.adopted = (
             "fast-forward",
             remote,

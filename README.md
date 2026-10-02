@@ -148,8 +148,13 @@ uv tool install nbp-git-safe==0.1.0
 git config nbp-safe.keyCommand '["op","document","get","<ITEM_ID>","--vault","<VAULT_ID>"]'
 nbp-git-safe init       # hooks, exclude block, local branch tracking origin/nbp-safe
 nbp-git-safe unlock
-nbp-git-safe open       # real names and files appear
+nbp-git-safe open       # first time: stops and shows the vault's key id, seq and tip
+nbp-git-safe open --confirm-first-adopt   # after comparing them with another machine
 ```
+
+The first `open` (or `sync`) of a vault branch this clone has never verified asks for that
+confirmation: a fresh clone cannot know that the tip it found is the newest one (trust on first
+use, see [THREAT_MODEL.md](THREAT_MODEL.md)).
 
 Without the key a clone only shows `store/<hex>` objects. `git pull` keeps the machine current
 (`post-merge` merges and opens the vault). Two machines that diverge converge with `sync`: a
@@ -237,7 +242,8 @@ Como funciona: os arquivos continuam nos caminhos de sempre, escondidos do branc
 bloco em `.git/info/exclude`; uma branch orfa `nbp-safe` guarda um indice cifrado e um blob cifrado
 por arquivo com nome aleatorio. Os hooks do git selam sozinhos a cada `git commit`; basta fazer
 `nbp-git-safe unlock` uma vez por periodo (8 h por padrao) e `git push origin main nbp-safe`.
-Em outra maquina: `git clone`, `init`, `unlock`, `open`.
+Em outra maquina: `git clone`, `init`, `unlock`, `open` (a primeira vez pede `--confirm-first-adopt`
+apos conferir o key id, a seq e a ponta mostrados).
 
 Limites honestos: nao foi auditado por terceiros; os arquivos ficam em texto claro na pasta de
 trabalho; o remoto ainda ve quantidade, tamanho aproximado e momento das mudancas; chave vazada

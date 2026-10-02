@@ -40,7 +40,7 @@ def test_clone_init_unlock_open_flow(
     assert "git config hooks" in result.err
     assert "created local branch" not in clone.cli("init").err  # idempotent
     unlock_fast(clone)
-    opened = clone.cli("open")
+    opened = clone.cli("open", "--confirm-first-adopt")
     assert opened.code == 0 and "4 written" in opened.out, opened.err
     for rel in ("data-private/plain.bin",):
         assert clone.read(rel) == hooked.repo.read(rel)
@@ -55,7 +55,7 @@ def test_post_checkout_reopens_files_deleted_locally(
     clone = clone_factory(hooked)
     assert clone.cli("init").code == 0
     unlock_fast(clone)
-    assert clone.cli("open").code == 0
+    assert clone.cli("open", "--confirm-first-adopt").code == 0
     victim = first_protected(clone, ".csv")
     expected = clone.read(victim)
     (clone.path / victim).unlink()
@@ -76,7 +76,7 @@ def test_post_merge_reopens_after_a_pull(
     clone = clone_factory(hooked)
     assert clone.cli("init").code == 0
     unlock_fast(clone)
-    assert clone.cli("open").code == 0
+    assert clone.cli("open", "--confirm-first-adopt").code == 0
     victim = first_protected(clone, ".json")
     expected = clone.read(victim)
     (clone.path / victim).unlink()

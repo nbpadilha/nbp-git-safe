@@ -5,7 +5,7 @@
 Security rule: nothing that executes a command may come from a versioned file. ``keyCommand`` is
 read ONLY from the local ``.git/config`` (section ``[nbp-safe]``); flags and environment variables
 cannot set it either, and ``.nbp-safe.config`` may only carry the harmless options listed in
-``VERSIONED_KEYS`` (anything else in that file is ignored).
+``VERSIONED_KEYS`` (anything else in that file is ignored, ``vault.ref`` included).
 """
 
 from __future__ import annotations
@@ -147,8 +147,9 @@ _PARSERS: dict[str, Callable[[str], Any]] = {
 }
 
 # ``.nbp-safe.config`` (versioned): harmless options only, as git-config keys.
+# ``vault.ref`` is NOT one of them: which vault branch (and so which rollback record) this clone
+# trusts must not be changeable by a commit of a collaborator or of whoever has push access.
 VERSIONED_KEYS = {
-    "vault.ref": "vaultref",
     "pad.bucket": "padbucket",
     "commit.timegranularity": "timegranularity",
 }

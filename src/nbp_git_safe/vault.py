@@ -82,6 +82,18 @@ class VaultRollbackError(VaultTamperError):
     index, or a chain that does not link up)."""
 
 
+class VerifiedStateError(VaultError):
+    """``vault-seq.json`` (the record of the vault tips this clone has verified) exists but cannot
+    be read. It is never read as "nothing verified": that would let an attacker who can damage
+    one local file turn a rollback check into a first adoption."""
+
+
+class AdoptionRequiredError(VaultError):
+    """The clone has never verified this vault branch (a fresh clone, a ref chosen by
+    configuration, a lost record). Trust on first use: the tip is authentic (it verifies under
+    the key) but nothing here can say it is the NEWEST one, so the owner confirms it."""
+
+
 class Backend(Protocol):
     """What the vault needs from the key agent (``agent.AgentClient`` implements it)."""
 
@@ -587,6 +599,7 @@ def seal(
     now: float | None = None,
 ) -> tuple[str | None, Analysis, SealPlan | None]:
     """Seal the protected files. Returns ``(commit or None, analysis, plan or None)``."""
+    read_verified(repo)  # a damaged record stops here, before anything is written
     protect.install_exclude_block(repo)
     state = load_vault(git, backend, cfg)
     analysis = analyze(git, repo, cfg, backend, state, renames=renames, forget=forget)
@@ -609,28 +622,51 @@ def _verified_path(repo: Repo) -> Path:
     return repo.state_dir / VERIFIED_FILE
 
 
-def read_verified(repo: Repo) -> dict[str, tuple[str, int]]:
+def read_verified(repo: Repo, *, strict: bool = True) -> dict[str, tuple[str, int]]:
     """``{vault ref: (tip, seq)}`` of the newest vault tip whose whole chain this clone has
-    verified. Commit ids and numbers only: no names, nothing secret."""
+    verified. Commit ids and numbers only: no names, nothing secret. An absent file is an empty
+    record (a clone that never verified anything); a file that exists but is unreadable or
+    malformed raises ``VerifiedStateError`` (``strict=False``: only for an explicit, confirmed
+    re-adoption, which writes the file again)."""
+    path = _verified_path(repo)
     try:
-        data = json.loads(_verified_path(repo).read_bytes().decode("ascii"))
-    except (OSError, ValueError):
+        raw = path.read_bytes()
+    except FileNotFoundError:
         return {}
-    refs = data.get("refs") if isinstance(data, dict) else None
+    except OSError:
+        raw = None
     out: dict[str, tuple[str, int]] = {}
-    if isinstance(refs, dict):
+    problem = False
+    try:
+        if raw is None:
+            raise ValueError("unreadable")
+        data = json.loads(raw.decode("ascii"))
+        refs = data.get("refs") if isinstance(data, dict) else None
+        if not isinstance(refs, dict):
+            raise ValueError("no refs")
         for ref, item in refs.items():
-            if isinstance(item, dict) and isinstance(ref, str):
-                tip, seq = item.get("tip"), item.get("seq")
-                if isinstance(tip, str) and _SHA_RE.match(tip) and isinstance(seq, int):
-                    out[ref] = (tip, seq)
+            tip, seq = item.get("tip"), item.get("seq")
+            if not (isinstance(tip, str) and _SHA_RE.match(tip) and isinstance(seq, int)):
+                raise ValueError("bad entry")
+            out[str(ref)] = (tip, seq)
+    except (ValueError, AttributeError):
+        problem = True
+    if problem:
+        if strict:
+            raise VerifiedStateError(
+                f"{VERIFIED_FILE} (the record of the vault tips this clone verified) is "
+                "unreadable, so no rollback check can be trusted; compare the vault's key id and "
+                "seq with another machine (`status`), then re-adopt it with "
+                "--confirm-first-adopt (or delete the file)"
+            )
+        return {}
     return out
 
 
 def mark_verified(repo: Repo, ref: str, tip: str, seq: int, *, reset: bool = False) -> None:
     """Remember ``tip`` as verified. The recorded number only goes up, unless ``reset`` (an
     explicit adoption of a replaced history: purge, ``--accept-remote-rewrite``)."""
-    known = read_verified(repo)
+    known = read_verified(repo, strict=not reset)
     if not reset and ref in known and known[ref][1] > seq:
         return
     known[ref] = (tip, seq)
@@ -690,6 +726,20 @@ def verify_chain(git: Git, backend: Backend, tip: str, *, trusted: str | None = 
     return index_of(tip).seq
 
 
+def adoption_message(git: Git, backend: Backend, ref: str, tip: str, seq: int) -> str:
+    """What the owner needs to decide on a first adoption: the key id the vault was written with,
+    its ``seq`` and the tip. Compare them with ``status`` on a machine that already has the vault
+    (the same key id, a ``seq`` at least as high as anything seen there)."""
+    key_id = load_commit(git, backend, tip).index.key_id
+    return (
+        f"this clone has never verified {ref.removeprefix('refs/heads/')}: its tip {tip[:10]} "
+        f"verifies under the unlocked key (key id {key_id}, seq {seq}) but nothing here can say "
+        "it is the newest one (an older, authentic tip would look the same). Compare these "
+        "values with another machine's `status`, then repeat the command with "
+        "--confirm-first-adopt"
+    )
+
+
 def check_chain(
     git: Git,
     backend: Backend,
@@ -698,24 +748,31 @@ def check_chain(
     tip: str,
     *,
     allow_replaced: bool = False,
+    adopt: bool = False,
 ) -> int:
-    """Verify ``tip`` against what this clone has verified before. A tip that is behind, or that
-    does not descend from, the verified one is a rollback / replaced history and is refused
-    (``allow_replaced``: the caller is adopting such a history on purpose and calls
+    """Verify ``tip`` against what this clone has verified before. A branch it has never verified
+    is only adopted with ``adopt`` (trust on first use: ``AdoptionRequiredError`` says which key,
+    which ``seq`` and which tip, for the owner to compare with another machine). A tip that is
+    behind, or that does not descend from, the verified one is a rollback / replaced history and
+    is refused (``allow_replaced``: the caller is adopting such a history on purpose and calls
     ``mark_verified(..., reset=True)`` afterwards). Returns the ``seq`` of ``tip``. Records
     nothing."""
-    known = read_verified(repo).get(ref)
+    known = read_verified(repo, strict=not adopt).get(ref)
+    if known is None:
+        seq = verify_chain(git, backend, tip)
+        if not adopt:
+            raise AdoptionRequiredError(adoption_message(git, backend, ref, tip, seq))
+        return seq
     trusted: str | None = None
-    if known is not None:
-        if known[0] == tip:
-            return known[1]
-        if is_ancestor(git, tip, known[0]):
-            if not allow_replaced:
-                raise VaultRollbackError("the vault is behind a state this clone has verified")
-        elif is_ancestor(git, known[0], tip):
-            trusted = known[0]
-        elif not allow_replaced:
-            raise VaultRollbackError("the vault history was replaced (it does not descend from it)")
+    if known[0] == tip:
+        return known[1]
+    if is_ancestor(git, tip, known[0]):
+        if not allow_replaced:
+            raise VaultRollbackError("the vault is behind a state this clone has verified")
+    elif is_ancestor(git, known[0], tip):
+        trusted = known[0]
+    elif not allow_replaced:
+        raise VaultRollbackError("the vault history was replaced (it does not descend from it)")
     return verify_chain(git, backend, tip, trusted=trusted)
 
 
@@ -797,6 +854,8 @@ def open_vault(
     cfg: Config,
     backend: Backend,
     known_macs: Mapping[str, frozenset[str]] | None = None,
+    *,
+    adopt: bool = False,
 ) -> OpenResult:
     """Materialize the vault at the real paths. Never overwrites diverging local plaintext.
 
@@ -805,12 +864,14 @@ def open_vault(
     has no local edits, so it is not "diverging".
 
     Everything is authenticated and validated before the first byte is written; a failure at
-    that stage aborts with nothing written."""
+    that stage aborts with nothing written. A vault branch this clone has never verified is
+    opened only with ``adopt`` (``--confirm-first-adopt``): see ``check_chain``."""
     state = load_vault(git, backend, cfg, use_remote_fallback=True)
     if state.tip is None:
         raise VaultError("no vault found (branch nbp-safe does not exist)")
-    seq = check_chain(git, backend, repo, cfg.vault_ref, state.tip)
-    mark_verified(repo, cfg.vault_ref, state.tip, seq)
+    first = adopt and cfg.vault_ref not in read_verified(repo, strict=False)
+    seq = check_chain(git, backend, repo, cfg.vault_ref, state.tip, adopt=adopt)
+    mark_verified(repo, cfg.vault_ref, state.tip, seq, reset=first)
     protect.install_exclude_block(repo)
     idx = state.index
     try:

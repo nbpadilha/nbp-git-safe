@@ -17,7 +17,7 @@ from pathlib import Path
 from nbp_git_safe import agent, crypto, guard, hooks, multi, protect, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, rev_parse, split_z
+from nbp_git_safe.gitutil import Git, GitError, Repo, split_z
 
 OK, INFO, WARN, PROBLEM = "ok", "info", "warn", "problem"
 LISTED = 10
@@ -173,6 +173,12 @@ def run_doctor(
             f"{len(cfg.ignored_versioned_keys)} key(s) in .nbp-safe.config are ignored "
             "(not allowed there)",
         )
+    if "vault.ref" in cfg.ignored_versioned_keys:
+        add(
+            WARN,
+            "vault.ref in .nbp-safe.config is ignored: which vault branch this clone trusts is a "
+            "local decision (`git config nbp-safe.vaultRef <ref>`), never a versioned one",
+        )
 
     # --- protected files that git does not ignore (layer 1 defeated by a negation)
     try:
@@ -255,6 +261,8 @@ def run_doctor(
     if info is not None:
         try:
             status = unlock.current_status(repo.state_dir)
+        except agent.ProcessInspectionError as exc:
+            add(WARN, f"agent unavailable: {exc}")
         except agent.HandshakeError:
             add(
                 PROBLEM,
@@ -273,9 +281,7 @@ def run_doctor(
         try:
             with agent.AgentClient.connect(repo.state_dir) as backend:
                 state = vault.load_vault(git, backend, cfg, use_remote_fallback=True)
-                if state.tip is not None and state.tip == rev_parse(
-                    git, cfg.vault_ref + "^{commit}"
-                ):
+                if state.tip is not None:  # local, or the remote-tracking one when there is none
                     vault.check_chain(git, backend, repo, cfg.vault_ref, state.tip)
             if state.tip is None:
                 add(INFO, "no vault yet (nothing sealed)")
@@ -284,6 +290,8 @@ def run_doctor(
                     OK,
                     f"vault verifies: {len(state.index.entries)} file(s), key {state.index.key_id}",
                 )
+        except vault.AdoptionRequiredError as exc:
+            add(WARN, f"the vault is not adopted yet: {exc}")
         except (vault.VaultError, crypto.NbpCryptoError, index_mod.IndexValidationError) as exc:
             add(PROBLEM, f"the vault does not verify: {exc}")
         except agent.AgentError as exc:

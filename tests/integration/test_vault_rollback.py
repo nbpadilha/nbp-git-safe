@@ -212,12 +212,20 @@ def test_the_old_index_format_is_not_accepted(hooked: Env) -> None:
     assert refused.code == 1 and "failed validation" in refused.err
 
 
-def test_verified_file_is_tolerant_of_garbage(hooked: Env, tmp_path: Path) -> None:
+def test_verified_file_garbage_is_an_error_and_a_missing_file_is_empty(
+    hooked: Env, tmp_path: Path
+) -> None:
+    """Changed on purpose (second review): garbage used to read as ``{}``, which turned a damaged
+    file into "this clone verified nothing" and so into a silent first adoption."""
     found, _git = discover(hooked.repo.path, hooked.git.env)
     path = found.state_dir / vault.VERIFIED_FILE
     for junk in (b"", b"[not json", b'{"refs": 3}', b'{"refs": {"a": {"tip": "zz", "seq": 1}}}'):
         path.write_bytes(junk)
-        assert vault.read_verified(found) == {}
+        with pytest.raises(vault.VerifiedStateError):
+            vault.read_verified(found)
+        assert vault.read_verified(found, strict=False) == {}  # only for a confirmed re-adoption
+    path.unlink()
+    assert vault.read_verified(found) == {}  # no file: a clone that never verified anything
     vault.mark_verified(found, "refs/heads/nbp-safe", "a" * 40, 5)
     vault.mark_verified(found, "refs/heads/nbp-safe", "b" * 40, 3)  # never goes down ...
     assert vault.read_verified(found) == {"refs/heads/nbp-safe": ("a" * 40, 5)}

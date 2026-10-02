@@ -119,9 +119,15 @@ index_blob = header || AES-SIV-256(k_index).encrypt(frame, AD = [header || "inde
   rotate starts a new lineage (`seq` 1).
 * **Local verification state** (`.git/nbp-safe/vault-seq.json`, commit ids and numbers only):
   the newest vault tip whose chain this clone verified, per vault ref. `open`, `sync`, the
-  hooks, `doctor` and the vault `pre-push` verify the chain (incrementally from that tip, or from
-  the root when it is unknown) and refuse a tip that is behind it or does not descend from it,
-  unless the history is adopted on purpose (`purge`, `--accept-remote-rewrite`).
+  hooks, `doctor` and the vault `pre-push` verify the chain (incrementally from that tip) and
+  refuse a tip that is behind it or does not descend from it, unless the history is adopted on
+  purpose (`purge`, `--accept-remote-rewrite`). A ref with no entry is never adopted silently: the
+  chain is verified from the root and the tip is adopted only with `--confirm-first-adopt`, after
+  the error showed the key id, the `seq` and the tip (trust on first use, see `THREAT_MODEL.md`). A
+  file that exists but cannot be parsed is an error, not an empty record.
+* **Pattern memory** (`.git/nbp-safe/pattern-versions/<id>`, `pattern-forgotten.json`): one file per
+  distinct version of `.nbp-safe` the clone has seen (the meaningful pattern lines, `<id>` = first 32
+  hex digits of their SHA-256), and the patterns / versions `unprotect` forgot. See `GUARD.md`.
 
 ## 7. Content MAC
 
@@ -182,8 +188,11 @@ branch. Each decrypted blob must match its entry's `size` and `mac`.
 
 **State directory.** Everything the agent needs to be found lives OUTSIDE the repository, in a
 per-user directory computed by the program (never read from a file):
-`%LOCALAPPDATA%\nbp-git-safe\<repo hash>` on Windows, `$XDG_RUNTIME_DIR/nbp-git-safe/<repo hash>` (or
-`~/.cache/nbp-git-safe/<repo hash>`) on POSIX, where `<repo hash>` is the first 24 hex digits of
+`%LOCALAPPDATA%/nbp-git-safe/<repo hash>` on Windows, `~/.cache/nbp-git-safe-<uid>/<repo hash>` on
+POSIX (the home directory comes from the password database, not from `$HOME`, and
+`$XDG_RUNTIME_DIR` is deliberately not used: it exists in a login session and not in a hook started
+by a GUI or cron, which would otherwise look for the agent in another place; the absolute path in
+`NBP_SAFE_RUNTIME_DIR` overrides the base), where `<repo hash>` is the first 24 hex digits of
 SHA-256 of the canonical path of `<git-common-dir>/nbp-safe`. The directory and its parent are
 created by the tool (Windows: protected DACL, full control for the current user, SYSTEM and
 Administrators only; POSIX: mode 0700) and **re-verified on every use**: not a link or junction,
