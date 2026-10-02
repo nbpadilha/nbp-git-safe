@@ -212,10 +212,33 @@ def agent_json_path(state_dir: Path) -> Path:
     return Path(state_dir) / AGENT_JSON
 
 
+SHARING_RETRY_WINDOW = 3.0  # seconds a sharing violation is waited out before it is an error
+SHARING_RETRY_STEP = 0.005
+
+
+def _retry_sharing(operation: Callable[[], Any]) -> Any:
+    """Run a file operation on ``agent.json``, waiting out Windows sharing violations.
+
+    ``agent.json`` is replaced atomically (``os.replace``) and polled by other processes. On
+    Windows an ``open``/``replace``/``unlink`` that collides with another process's open or
+    rename of the same name fails with ``PermissionError`` (EACCES) instead of blocking; that is
+    transient by nature. Measured on Windows 11: a reader racing a replacing writer got it on
+    ~10% of the attempts and the writer on most of them. The wait is bounded; after the window
+    the error is raised as it is."""
+    deadline = time.monotonic() + SHARING_RETRY_WINDOW
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(SHARING_RETRY_STEP)
+
+
 def read_agent_info(state_dir: Path) -> AgentInfo | None:
     path = agent_json_path(state_dir)
     try:
-        raw = path.read_bytes()
+        raw = _retry_sharing(path.read_bytes)
     except FileNotFoundError:
         return None
     return AgentInfo.from_json(raw)
@@ -229,12 +252,17 @@ def write_agent_info(state_dir: Path, info: AgentInfo) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(info.to_json())
-    os.replace(tmp, agent_json_path(state_dir))
+    try:
+        _retry_sharing(lambda: os.replace(tmp, agent_json_path(state_dir)))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def remove_agent_info(state_dir: Path) -> None:
     with contextlib.suppress(FileNotFoundError):
-        agent_json_path(state_dir).unlink()
+        _retry_sharing(agent_json_path(state_dir).unlink)
 
 
 def cleanup_orphan(state_dir: Path) -> bool:
@@ -420,12 +448,16 @@ class AgentServer:
             return
         self._stopping.set()
         self._keys = None
-        remove_agent_info(self.state_dir)
-        if self._unix_dir is not None:
-            shutil.rmtree(self._unix_dir, ignore_errors=True)
-        if self._exit is not os._exit:
-            self._wake()  # thread mode (tests): unblock accept()
-        self._exit(0)
+        try:
+            # the key is already gone; a stuck file must never keep the process alive
+            with contextlib.suppress(OSError):
+                remove_agent_info(self.state_dir)
+        finally:
+            if self._unix_dir is not None:
+                shutil.rmtree(self._unix_dir, ignore_errors=True)
+            if self._exit is not os._exit:
+                self._wake()  # thread mode (tests): unblock accept()
+            self._exit(0)
 
     def _wake(self) -> None:
         """Unblock ``accept`` (used by thread-mode shutdown in tests)."""

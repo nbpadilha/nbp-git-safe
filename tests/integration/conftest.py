@@ -120,6 +120,22 @@ def clone_factory(isolated_git: IsolatedGit, tmp_path: Path) -> Callable[..., Nb
     return factory
 
 
+@pytest.fixture
+def unlock_fast() -> Iterator[Callable[[NbpRepo], ThreadAgent]]:
+    """Unlock a repository with an in-process agent (no detached process, no keyCommand run).
+    The real detached-agent path is covered by ``test_agent_process`` and the full-cycle test."""
+    started: list[ThreadAgent] = []
+
+    def unlock(repo: NbpRepo) -> ThreadAgent:
+        thread_agent = repo.unlock_in_thread()
+        started.append(thread_agent)
+        return thread_agent
+
+    yield unlock
+    for thread_agent in started:
+        thread_agent.stop()
+
+
 def make_git(repo: NbpRepo) -> Git:
     return Git(repo.path, repo.git.env)
 

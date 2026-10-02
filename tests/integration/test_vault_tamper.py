@@ -136,14 +136,17 @@ BLOB_LEVEL = {
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
 def test_open_detects_tampering_and_writes_nothing(
-    env: Env, clone_factory: CloneFactory, name: str
+    env: Env,
+    clone_factory: CloneFactory,
+    name: str,
+    unlock_fast: Callable[..., object],
 ) -> None:
     assert env.seal().code == 0
-    env.gate()
+    env.push()  # clean-push leak gates live in test_vault_cycle; here the gate runs after tampering
     tamper_and_push(env, MUTATIONS[name])
 
     clone = clone_factory(env)
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     before = snapshot(clone.path)
     result = clone.cli("open")
     assert result.code == 1, (name, result.out)
@@ -212,11 +215,14 @@ EVIL_PATHS = {
 
 @pytest.mark.parametrize("name", sorted(EVIL_PATHS))
 def test_forged_index_with_evil_path_is_refused(
-    env: Env, clone_factory: CloneFactory, name: str
+    env: Env,
+    clone_factory: CloneFactory,
+    name: str,
+    unlock_fast: Callable[..., object],
 ) -> None:
     clone = clone_of_main(env, clone_factory)
     forged_vault(clone, {"a" * 32: (EVIL_PATHS[name], b"payload")})
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     before = snapshot(clone.path)
     outside = clone.path.parent / "escape.txt"
     result = clone.cli("open")
@@ -230,21 +236,25 @@ def test_forged_index_with_evil_path_is_refused(
 
 
 def test_forged_index_case_collision_and_file_dir_conflict_refused(
-    env: Env, clone_factory: CloneFactory
+    env: Env,
+    clone_factory: CloneFactory,
+    unlock_fast: Callable[..., object],
 ) -> None:
     clone = clone_of_main(env, clone_factory)
     forged_vault(
         clone,
         {"a" * 32: ("reports/Dup.txt", b"1"), "b" * 32: ("reports/dup.TXT", b"2")},
     )
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     assert clone.cli("open").code == 1
     forged_vault(clone, {"a" * 32: ("reports/x", b"1"), "b" * 32: ("reports/x/y", b"2")})
     assert clone.cli("open").code == 1
     assert not (clone.path / "reports").exists()
 
 
-def test_forged_tracked_path_is_refused(env: Env, clone_factory: CloneFactory) -> None:
+def test_forged_tracked_path_is_refused(
+    env: Env, clone_factory: CloneFactory, unlock_fast: Callable[..., object]
+) -> None:
     """Even if a pattern covers it, a file tracked on the main branch is never overwritten."""
     env.repo.write("tracked-doc.txt", "versioned normally")
     env.repo.write(
@@ -255,14 +265,16 @@ def test_forged_tracked_path_is_refused(env: Env, clone_factory: CloneFactory) -
     env.repo.sh("push", "-q", "origin", "main")
     clone = clone_of_main(env, clone_factory)
     forged_vault(clone, {"a" * 32: ("tracked-doc.txt", b"overwritten!")})
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     result = clone.cli("open")
     assert result.code == 1 and "tracked on the main branch" in result.err
     assert clone.read("tracked-doc.txt") == b"versioned normally"
 
 
 def test_blob_that_does_not_match_the_authenticated_index_is_refused(
-    env: Env, clone_factory: CloneFactory
+    env: Env,
+    clone_factory: CloneFactory,
+    unlock_fast: Callable[..., object],
 ) -> None:
     clone = clone_of_main(env, clone_factory)
     forged_vault(
@@ -270,13 +282,15 @@ def test_blob_that_does_not_match_the_authenticated_index_is_refused(
         {"a" * 32: ("reports/lie.txt", b"actual content")},
         mac_of={"a" * 32: b"what the index claims"},
     )
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     result = clone.cli("open")
     assert result.code == 1 and "does not match the authenticated index" in result.err
     assert not (clone.path / "reports").exists()
 
 
-def test_index_for_another_key_id_is_refused(env: Env, clone_factory: CloneFactory) -> None:
+def test_index_for_another_key_id_is_refused(
+    env: Env, clone_factory: CloneFactory, unlock_fast: Callable[..., object]
+) -> None:
     clone = clone_of_main(env, clone_factory)
     keys = crypto.KeySet(clone.master)
     index = {"v": 1, "key_id": "00" * 8, "entries": {}}
@@ -288,24 +302,28 @@ def test_index_for_another_key_id_is_refused(env: Env, clone_factory: CloneFacto
             "nbp-safe/index": crypto.encrypt_index(keys, index),
         },
     )
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     assert clone.cli("open").code == 1
 
 
 def test_valid_forged_vault_with_good_paths_is_opened(
-    env: Env, clone_factory: CloneFactory
+    env: Env,
+    clone_factory: CloneFactory,
+    unlock_fast: Callable[..., object],
 ) -> None:
     """Control for the forging helper: a well-formed vault made by the helper opens fine."""
     clone = clone_of_main(env, clone_factory)
     forged_vault(clone, {"c" * 32: ("reports/ok file.txt", b"fine")})
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     assert clone.cli("open").code == 0
     assert clone.read("reports/ok file.txt") == b"fine"
 
 
-def test_open_without_any_vault(env: Env, clone_factory: CloneFactory) -> None:
+def test_open_without_any_vault(
+    env: Env, clone_factory: CloneFactory, unlock_fast: Callable[..., object]
+) -> None:
     clone = clone_of_main(env, clone_factory)
-    assert clone.cli("unlock").code == 0
+    unlock_fast(clone)
     result = clone.cli("open")
     assert result.code == 1 and "no vault" in result.err
 
