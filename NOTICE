@@ -1,0 +1,22 @@
+nbp-git-safe
+Copyright (c) 2026 Nikolas Padilha
+
+This project is a derivative work of transcrypt, which is distributed under
+the MIT License (see LICENSE, which retains the original copyright lines).
+
+  Upstream project : transcrypt
+  Upstream URL     : https://github.com/elasticdog/transcrypt
+  Upstream license : MIT
+  Base commit      : 1b59c8e505c0f0eb396dce4d36274a12a446e2d6
+                     (tagged `upstream-base` in this repository)
+  Upstream authors : James Murty, Aaron Bull Schaefer, Woody Gilk
+
+The upstream history is preserved in this repository's git log. The
+transcrypt Bash implementation has been replaced by a Python implementation
+in later commits; ideas and test-isolation techniques adapted from transcrypt
+carry attribution comments in the relevant source files.
+
+Clean-room statement: no source code from GPL/MPL-licensed projects
+(git-crypt, git-remote-gcrypt, sops) was read or copied.
+
+See THIRD_PARTY.md for runtime and development dependencies.
