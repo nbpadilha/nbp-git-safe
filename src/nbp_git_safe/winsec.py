@@ -57,7 +57,10 @@ _ERROR_ALREADY_EXISTS = 183
 _ADMINS = "S-1-5-32-544"
 _SYSTEM = "S-1-5-18"
 _CREATOR = "S-1-3-0"
-_ALIASES = {"SY": _SYSTEM, "BA": _ADMINS, "CO": _CREATOR}
+_OWNER_RIGHTS = "S-1-3-4"
+_ALIASES = {"SY": _SYSTEM, "BA": _ADMINS, "CO": _CREATOR, "OW": _OWNER_RIGHTS}
+_DOMAIN_SID = re.compile(r"^(S-1-5-21-\d+-\d+-\d+)-(\d+)$")
+_LOCAL_ADMIN_RID = "500"
 _ACE_RE = re.compile(r"\(([^()]*)\)")
 _ALLOW_TYPES = {"A", "OA", "XA", "ZA"}
 
@@ -237,17 +240,41 @@ def create_private_dir(path: str | os.PathLike[str]) -> None:
         descriptor.close()
 
 
+def _local_admin_sid(me: str) -> str | None:
+    """SID of this machine's built-in Administrator: the current user's own domain prefix and the
+    well-known relative id 500 (the alias ``LA`` in SDDL)."""
+    match = _DOMAIN_SID.match(me.upper())
+    return f"{match.group(1)}-{_LOCAL_ADMIN_RID}" if match else None
+
+
+def _resolve_trustee(trustee: str, me: str) -> str:
+    """The SID an SDDL trustee stands for: aliases (``SY``, ``BA``, ``LA``, ``CO``, ``OW``) are
+    resolved, an SID is normalised to upper case; anything else is returned as it is (and so is
+    "another account")."""
+    text = trustee.strip().upper()
+    if text == "LA":
+        return _local_admin_sid(me) or "LA"
+    return _ALIASES.get(text, text)
+
+
 def _dacl_problem(dacl_sddl: str, me: str) -> str | None:
-    allowed = {me, _SYSTEM, _ADMINS, _CREATOR}
-    body = dacl_sddl
-    for match in _ACE_RE.finditer(body):
+    """Does the DACL grant access to anyone but the current user, SYSTEM, Administrators (and the
+    built-in Administrator account, a member of them), CREATOR OWNER and OWNER RIGHTS? Every
+    trustee is compared by SID after the SDDL aliases are resolved, so the current user is
+    accepted whichever way it is printed (``S-1-5-21-...-500`` and ``LA`` are the same account)."""
+    me_sid = me.upper()
+    allowed = {me_sid, _SYSTEM, _ADMINS, _CREATOR, _OWNER_RIGHTS}
+    local_admin = _local_admin_sid(me_sid)
+    if local_admin:
+        allowed.add(local_admin)
+    for match in _ACE_RE.finditer(dacl_sddl):
         fields = match.group(1).split(";")
         if len(fields) < 6:
             return "unrecognised ACL entry"
         kind, trustee = fields[0], fields[5]
         if kind not in _ALLOW_TYPES:
             continue
-        if _ALIASES.get(trustee, trustee) not in allowed:
+        if _resolve_trustee(trustee, me_sid) not in allowed:
             return "the ACL grants access to another account"
     return None
 

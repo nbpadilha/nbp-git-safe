@@ -44,17 +44,41 @@ attacks on the `cryptography` library itself.
   an ancestor of it (rollback) or unrelated (replaced history) is reported and refused unless you
   pass `--accept-remote-rewrite`. Every index also carries an authenticated, strictly increasing
   `seq` and the digest of its parent's index (`docs/FORMAT.md` section 6), and the clone remembers
-  the newest tip it verified: a fast-forward commit that replays an older encrypted index (which
-  needs no key) fails the chain check and is never opened.
-* **Pattern removal upstream.** A collaborator who removes a pattern from `.nbp-safe` (even from a
-  web UI, where no hook runs) does not unprotect anything here: the clone keeps a sticky memory of
-  every pattern it has seen, the guard also blocks any path of the vault index, `post-merge` warns
-  loudly, and only `unprotect <pattern>` (typed confirmation) forgets one (`docs/GUARD.md`).
+  the newest tip it verified per vault ref (`.git/nbp-safe/vault-seq.json`: commit ids and numbers
+  only): a fast-forward commit that replays an older encrypted index (which needs no key) fails the
+  chain check and is never opened. Which vault ref a clone trusts is a **local** decision
+  (`nbp-safe.vaultRef` in `.git/config`, the flag or the environment): a `vault.ref` in the
+  versioned `.nbp-safe.config` is ignored (and reported), so a commit cannot redirect the clone to
+  another ref that holds an old, authentic vault commit and so has no record to be compared with.
+  A vault ref this clone has never verified (a fresh clone, a ref you chose, a lost record) is
+  adopted only with `--confirm-first-adopt` after the error showed its key id, `seq` and tip.
+  A `vault-seq.json` that exists but cannot be read is an error (`open`, `sync`, `seal` and the
+  push guard stop and say so; `doctor` reports a problem), never an empty record.
+* **Pattern removal and negation upstream.** A collaborator who removes a pattern from `.nbp-safe`
+  or defeats it with a `!` negation (even from a web UI, where no hook runs) does not unprotect
+  anything here: the clone keeps every distinct *version* of `.nbp-safe` it has seen and evaluates
+  each as a source of the union, so a negation of a newer version never cancels what an older
+  version protects, while a negation inside the version it is written in keeps working. The guard
+  also blocks any path of the vault index, `post-merge`/`post-checkout`/`doctor` warn loudly when
+  the current version weakens an earlier one, and only `unprotect <pattern>` or
+  `unprotect --accept-current` (typed confirmation, durable) forgets (`docs/GUARD.md`). The
+  protection lives in this clone's memory: a clone that never saw the protecting version (a fresh
+  clone of an already-weakened `.nbp-safe`) has nothing to remember. `.nbp-safe` and
+  `.nbp-safe.config` are never protected paths, so a broad pattern pushed from the remote cannot
+  lock the repair of the file.
 * **Hostile working tree.** `git` and `keyCommand` are resolved to absolute paths outside the
-  current directory (and children get `NoDefaultCurrentDirectoryInExePath=1`); `open` writes through
-  random, exclusively created temporary files and re-checks links and junctions before every
-  write; a versioned `.nbp-safe.config` can only raise `pad.bucket` / `commit.timeGranularity`
-  to their floors and cannot set `onMissing`.
+  current directory and outside the repository tree (`PATH` entries inside the repository, such as
+  a `node_modules/.bin` or a `bin/` of the project, are skipped; when nothing else is found the
+  bare name is used and the system search applies), and children get
+  `NoDefaultCurrentDirectoryInExePath=1`; the auxiliary git that matches patterns runs with an
+  environment without the repository-binding variables and without the variables that inject
+  configuration or programs (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`,
+  `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH*`, `GIT_EDITOR`,
+  `GIT_TRACE*`; `GIT_CONFIG_GLOBAL`/`SYSTEM` stay, they are how the user's own config is chosen),
+  while the calls about the user's repository keep the user's environment, which fetch and push
+  need; `open` writes through random, exclusively created temporary files and re-checks links and
+  junctions before every write; a versioned `.nbp-safe.config` can only raise `pad.bucket` /
+  `commit.timeGranularity` to their floors and cannot set `onMissing` or `vault.ref`.
 * **The local object database (adversary 3).** Plain content and real names are never written to
   `.git/objects` by this tool (the invariant is enforced by leak tests on every scenario). The
   stat cache is keyed by an HMAC of the path and holds sizes, times and content MACs only.
@@ -71,8 +95,11 @@ attacks on the `cryptography` library itself.
   `recv_bytes` only (never unpickling), and never returns the key. What makes it hard to hijack
   (design in `docs/FORMAT.md` section 11):
   * `agent.json` is not a trust anchor. It lives outside the repository, in a per-user directory
-    (`%LOCALAPPDATA%`, `$XDG_RUNTIME_DIR` or `~/.cache`) that the tool creates and re-verifies on
-    every use (owner, no link/junction, DACL or mode); in a directory that fails the check nothing
+    (`%LOCALAPPDATA%` on Windows; `~/.cache/nbp-git-safe-<uid>` elsewhere, found through the
+    password database, not through `$HOME` or `$XDG_RUNTIME_DIR`, so that a hook started by a GUI
+    with another environment still finds the agent; `NBP_SAFE_RUNTIME_DIR` overrides it) that the
+    tool creates and re-verifies on every use (owner, no link/junction, DACL or mode); in a
+    directory that fails the check nothing
     is read, written or deleted. A planted file therefore cannot make the program delete anything
     (the only paths ever removed are `agent.json` and a socket at an exactly computed place), nor
     can it point the client at an arbitrary pipe.
@@ -84,7 +111,13 @@ attacks on the `cryptography` library itself.
   * Before sending a byte the client checks the pid and user of the process that serves the
     connection (`GetNamedPipeServerProcessId`, `SO_PEERCRED`); the Windows pipe has a DACL for the
     current user only, rejects remote clients, claims its name with `FILE_FLAG_FIRST_PIPE_INSTANCE`
-    and is opened by clients at `SECURITY_IDENTIFICATION`.
+    and is opened by clients at `SECURITY_IDENTIFICATION`. The pipe DACL and the state-directory
+    ACL are compared by SID after resolving the SDDL aliases (`SY`, `BA`, `LA`, `CO`, `OW`), so
+    the built-in Administrator is not refused for being printed as `LA`. Windows hides the token
+    of an elevated process from a non-elevated one (and the reverse): when the agent's process
+    cannot be inspected, the hook does not treat it as an impostor and does not give it anything;
+    it degrades to the path check and says "agent unavailable" with the elevation hint (run git
+    and `unlock` at the same level).
   * The agent process runs `python -I` (no `PYTHON*` variables, no current directory or user site on
     `sys.path`) with an explicit minimal environment, so a package planted in the temp or the
     working directory is never imported into the process that holds the key.
@@ -117,6 +150,13 @@ attacks on the `cryptography` library itself.
   the protected file (the push guard then blocks the push, but a local history that was never
   pushed keeps the data until rewritten). `git stash -a` / `-u` can capture protected files.
   Clients that do not run hooks (some GUIs, libgit2-based tools) skip layers 2 to 4.
+* **First adoption of a vault (trust on first use).** A clone that has never verified a vault ref
+  cannot know which tip is the newest: an older commit of the real history, pushed by someone with
+  write access as the vault branch, verifies under the key and looks like a valid vault. The
+  confirmation (`--confirm-first-adopt`) shows the key id, the `seq` and the tip so that the owner
+  can compare them with a machine that already has the vault; it cannot decide for the owner. After
+  the first adoption the chain and the recorded tip detect any older tip. A clone whose
+  `vault-seq.json` is lost starts again at this point.
 * **A locked agent.** With the agent locked the content check cannot run: a renamed copy of a
   protected file can pass `pre-commit` (the path check still runs).
 * **History that existed before adoption.** The tool protects what it manages from now on. Files

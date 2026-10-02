@@ -42,22 +42,89 @@ GIT_REPO_ENV = (
 )
 _GIT_REPO_ENV_PREFIXES = ("GIT_PUSH_OPTION_",)
 
+# Variables that inject configuration or make git run another program. They are dropped (with the
+# repository-binding ones) only for the AUXILIARY git processes this tool starts about a scratch
+# repository (``Git.clean``): those need none of the user's configuration, and a value planted in
+# the environment of a hook (``GIT_CONFIG_COUNT``/``KEY_n``/``VALUE_n`` or
+# ``GIT_CONFIG_PARAMETERS`` set ``core.fsmonitor``, ``core.hooksPath``, ``core.pager``...) must not
+# run anything there. The calls about the USER'S repository keep the whole environment: fetch,
+# push and ``git config`` legitimately depend on ``GIT_ASKPASS``, ``GIT_SSH_COMMAND``,
+# ``GIT_CONFIG_*`` and friends. ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM``/``GIT_CONFIG_NOSYSTEM``
+# stay: they only choose WHICH config files are read (the tests' isolation uses them).
+GIT_INJECTION_ENV = (
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PROXY_COMMAND",
+)
+_GIT_INJECTION_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE")
+
 
 NO_CWD_EXE = "NoDefaultCurrentDirectoryInExePath"
 
 
-def resolve_executable(name: str, env: Mapping[str, str] | None = None) -> str:
-    """Absolute path of ``name`` found on ``PATH``, never in the current directory.
+def _norm(path: str | os.PathLike[str]) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _cwd() -> str:
+    """The normalised current directory ("" when it no longer exists: then nothing equals it)."""
+    try:
+        return _norm(os.getcwd())
+    except OSError:
+        return ""
+
+
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def repository_root_of(start: str | os.PathLike[str]) -> str | None:
+    """The nearest directory at or above ``start`` that has a ``.git`` entry (a directory, or the
+    file of a linked worktree), or ``None`` outside any repository. Found by walking up, not by
+    running git (this is used to decide WHICH git to run)."""
+    current = _norm(start)
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def resolve_executable(
+    name: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    avoid: Sequence[str | os.PathLike[str]] = (),
+) -> str:
+    """Absolute path of ``name`` found on ``PATH``, never in the current directory and never inside
+    the repository tree.
 
     Windows' ``CreateProcess`` (and so ``subprocess``) looks in the CURRENT directory before
     ``PATH``: a ``git.exe`` planted in a repository's working tree would run instead of git. Empty
-    and relative ``PATH`` entries are skipped, as is any entry that is the current directory. A
-    name that already has a directory part is returned unchanged; when nothing is found the bare
-    name is returned (children still get ``NoDefaultCurrentDirectoryInExePath=1``)."""
+    and relative ``PATH`` entries are skipped, as is any entry that is the current directory, and
+    any entry INSIDE the tree of the repository around the current directory or of the
+    repositories in ``avoid`` (a project's ``node_modules/.bin`` or ``bin/``, put on ``PATH`` by
+    an activated environment, is as hostile as the working directory itself). A name that already
+    has a directory part is returned unchanged; when nothing is found the bare name is returned
+    (children still get ``NoDefaultCurrentDirectoryInExePath=1``)."""
     if os.path.dirname(name):
         return name
     source = os.environ if env is None else env
-    cwd = os.path.normcase(os.path.realpath(os.getcwd()))
+    cwd = _cwd()
+    roots = [_norm(path) for path in avoid]
+    around = repository_root_of(cwd) if cwd else None
+    if around is not None:
+        roots.append(around)
     exts = [""]
     if sys.platform == "win32":
         exts = [e.lower() for e in source.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
@@ -66,7 +133,8 @@ def resolve_executable(name: str, env: Mapping[str, str] | None = None) -> str:
     for entry in source.get("PATH", "").split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             continue
-        if os.path.normcase(os.path.realpath(entry)) == cwd:
+        real = _norm(entry)
+        if real == cwd or any(_inside(real, root) for root in roots):
             continue
         for ext in exts:
             candidate = os.path.join(entry, name + ext)
@@ -77,14 +145,25 @@ def resolve_executable(name: str, env: Mapping[str, str] | None = None) -> str:
     return name
 
 
-_git_exe: list[str] = []
+_untrusted_roots: list[str] = []
+_git_exe: dict[tuple[str, ...], str] = {}
+
+
+def declare_repository(toplevel: str | os.PathLike[str]) -> None:
+    """Tell ``git_executable`` that ``toplevel`` is a repository whose tree must not provide the
+    git to run (``nbp-git-safe -C <repo>`` runs from anywhere, so the current directory says
+    nothing about it)."""
+    root = _norm(toplevel)
+    if root not in _untrusted_roots:
+        _untrusted_roots.append(root)
 
 
 def git_executable() -> str:
-    """The git to run, resolved once (see ``resolve_executable``)."""
-    if not _git_exe:
-        _git_exe.append(resolve_executable("git"))
-    return _git_exe[0]
+    """The git to run, resolved once per set of repositories (see ``resolve_executable``)."""
+    key = (_cwd(), *_untrusted_roots)
+    if key not in _git_exe:
+        _git_exe[key] = resolve_executable("git", avoid=_untrusted_roots)
+    return _git_exe[key]
 
 
 def child_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -94,14 +173,12 @@ def child_env(env: Mapping[str, str]) -> dict[str, str]:
 
 def clean_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """A copy of ``env`` (default: the process environment) without the repository-binding git
-    variables (``GIT_REPO_ENV``). Identity, config and locale variables are kept."""
+    variables (``GIT_REPO_ENV``) and without the ones that inject configuration or programs
+    (``GIT_INJECTION_ENV``). Identity, the choice of config files and locale variables are kept."""
     source = os.environ if env is None else env
-    drop = set(GIT_REPO_ENV)
-    return {
-        k: v
-        for k, v in source.items()
-        if k not in drop and not k.startswith(_GIT_REPO_ENV_PREFIXES)
-    }
+    drop = set(GIT_REPO_ENV) | set(GIT_INJECTION_ENV)
+    prefixes = _GIT_REPO_ENV_PREFIXES + _GIT_INJECTION_PREFIXES
+    return {k: v for k, v in source.items() if k not in drop and not k.startswith(prefixes)}
 
 
 class GitError(Exception):
@@ -207,6 +284,7 @@ def discover(cwd: Path | str, env: Mapping[str, str] | None = None) -> tuple[Rep
     if len(lines) != 3:
         raise GitError("unexpected output from git rev-parse")
     repo = Repo(Path(lines[0]), Path(lines[1]), Path(lines[2]))
+    declare_repository(repo.toplevel)
     return repo, Git(repo.toplevel, env)
 
 

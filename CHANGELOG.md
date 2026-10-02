@@ -56,6 +56,43 @@ First public version. Python rewrite of an idea started as a fork of transcrypt 
   no names in the OS temp dir; `rotate --delete-old` waits for `keyCommand` to return the new key;
   purge instructions use `git gc --prune=now`.
 
+### Security fixes from the second adversarial review
+
+- A pushed `.nbp-safe` with `reports/` followed by `!reports/` / `!reports/**` defeated the pattern
+  memory (it stored lines, negations included) and `git add -A`, commit and push published the
+  files: the memory now keeps VERSIONS of `.nbp-safe`, each one a separate source of the union (a
+  negation of a newer version never cancels an older version's protection; a negation inside its
+  own version keeps working); `post-merge`/`post-checkout`/`doctor` warn when the current version
+  removed or defeated earlier protection. `unprotect` is durable (a later hook cannot bring the
+  pattern back from an older `HEAD`/index), says what still protects and asks for the typed
+  confirmation; new `unprotect --accept-current`. Changed behaviour: a negation you add yourself in
+  a new version needs `unprotect --accept-current` to take effect.
+- `vault.ref` in the versioned `.nbp-safe.config` redirected the clone to another ref holding an old,
+  authentic vault commit (the rollback record is per ref): the option is local-only now (ignored and
+  reported when versioned), and a vault ref the clone never verified is adopted only with
+  `--confirm-first-adopt` (`open`, `sync`, `init`), after the error showed key id, seq and tip.
+  Changed behaviour: the first `open`/`sync` of a fresh clone needs the flag; `init` no longer records
+  an unverified tip as seen.
+- A damaged `vault-seq.json` read as "nothing verified"; it is an error now (`open`, `sync`, `seal`,
+  the push guard, `doctor`).
+- A broad pattern from the remote (`*`) made `.nbp-safe` itself a protected path, so the commit that
+  repairs it was refused: `.nbp-safe` and `.nbp-safe.config` are never protected paths.
+- An agent running at another elevation level than the hook failed the identity check as an
+  "impostor"; it now degrades to the path check with an "agent unavailable ... elevation" message.
+- `_dacl_problem` refused the built-in Administrator printed as the SDDL alias `LA` (and other
+  aliases): trustees are resolved to SIDs before the comparison.
+- `PATH` entries inside the repository tree are ignored when resolving `git` and the `keyCommand`
+  executable; the auxiliary git no longer inherits `GIT_CONFIG_PARAMETERS`/`COUNT`/`KEY_*`/`VALUE_*`,
+  `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH*`, `GIT_EDITOR`, `GIT_TRACE*`.
+- On POSIX the agent state root no longer depends on `$XDG_RUNTIME_DIR` (present in a login
+  session, absent in a GUI-started hook): `~/.cache/nbp-git-safe-<uid>` (home from the password
+  database), `NBP_SAFE_RUNTIME_DIR` to override.
+- Docs: the post-purge flow on other machines is `git branch -D nbp-safe` + `sync
+  --accept-remote-rewrite` (the earlier "delete the branch and run `init`" did not work, and
+  `sync --accept-remote-rewrite` now also adopts a branch `init` had re-created); `git gc
+  --prune=now` instead of `git prune --expire now` for packed objects.
+- Tests: any test that creates the developer's real agent state directory now fails right there.
+
 ### Fixed
 
 - `agent.json` sharing violations on Windows made `unlock` fail intermittently.

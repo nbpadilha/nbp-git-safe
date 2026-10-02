@@ -14,20 +14,47 @@ The vault itself is described in `FORMAT.md`.
 | 5 | optional managed block in the versioned `.gitignore` (`init --gitignore-block`) | collaborators without the tool adding the files | no |
 
 The protected set is the **union** of `.nbp-safe` at `HEAD`, in the index, in the working tree (and,
-on push, at the pushed tip) plus the local `.git/info/nbp-safe`. Each version is matched on its own
-with git's own matcher and the results are unioned, so removing a pattern or adding a local `!`
-negation never unprotects something that another version still protects.
+on push, at the pushed tip), the local `.git/nbp-safe`, and every earlier version of `.nbp-safe`
+this clone has seen (below). Each version is matched on its own with git's own matcher and the
+results are unioned: a path is protected if **any** version protects it and no negation **of that
+same version** cancels it. So removing a pattern, adding a local `!` negation, or pushing a newer
+`.nbp-safe` whose `!` negations defeat an older pattern never unprotects something that another
+version still protects. A negation keeps working inside the version where it is written (the
+`!data-private/keep-public.txt` of a first `.nbp-safe` frees that file for good, as long as no other
+version contradicts it).
 
-**Sticky memory.** The union also includes `.git/nbp-safe/sticky-patterns`: every pattern this
-clone has ever seen in `.nbp-safe` (at `HEAD`, in the index or in the working tree), refreshed by
-`init`, `seal`, `sync`, the hooks and `post-merge`/`post-checkout`. A pattern that disappears from
-`.nbp-safe` (a collaborator removed it on the web, a merge brought the removal) is therefore
-**still protected here**: the exclude block keeps it, `pre-commit`/`pre-push` keep matching it, and
-`post-merge`/`post-checkout` print a loud warning (a count, never names) while `doctor` lists the
-patterns. Negations are not remembered (a removed `!` can only add protection). Only the explicit,
-confirmed `nbp-git-safe unprotect <pattern> --confirm "unprotect <pattern>"` forgets a pattern, and
-only one the file no longer has (remove it from `.nbp-safe` first, committing with
-`NBP_SAFE_ALLOW_UNPROTECT=1`).
+**Memory of versions.** `.git/nbp-safe/pattern-versions/<id>` holds every distinct text of
+`.nbp-safe` this clone has seen (its meaningful lines only: nothing but the patterns themselves),
+one file per version, recorded by `init`, `seal`, `sync`, the hooks and `post-merge`/`post-checkout`
+(from `HEAD`, the index and the working tree). Each one is a source of the union; a version that
+another one already covers (same lines plus only extra positive patterns) is not matched twice. A
+pattern that disappears from `.nbp-safe` (a collaborator removed it on the web, a merge brought the
+removal) and a pattern a newer version defeats with a negation are therefore **still protected
+here**: the exclude block keeps them (it lists the current file as it is, then the positive patterns
+of every version the current one does not cover, so a pushed `!reports/` cannot re-expose
+`reports/`), `pre-commit`/`pre-push` keep matching them, `post-merge`/`post-checkout` print a loud
+warning (a count, never names) and `doctor` lists the patterns (it compares the versions with git's
+own matcher on probe paths; it can miss an unusual pattern, the protection does not depend on it).
+Earlier negations are not "kept alive" either: a negation of an old version stays inside that
+version.
+
+Only the explicit, confirmed commands forget:
+
+* `nbp-git-safe unprotect <pattern> --confirm "unprotect <pattern>"` removes one pattern from every
+  remembered version; it needs the pattern gone from the working-tree `.nbp-safe`. What it forgot is
+  recorded (`pattern-forgotten.json`), so a later hook that re-reads an older `HEAD` or index cannot
+  bring it back. It says what still protects: `HEAD` and the index keep the pattern until the commit
+  that removes it from `.nbp-safe` is made (that commit needs `NBP_SAFE_ALLOW_UNPROTECT=1`, below).
+* `nbp-git-safe unprotect --accept-current --confirm "unprotect --accept-current"` takes the current
+  working-tree `.nbp-safe` as the only base: it forgets every earlier version (the way to make a
+  negation you wrote yourself effective, or to accept what a collaborator changed).
+
+A pattern or version that is written into the working-tree file again counts again.
+
+**Our own files.** `.nbp-safe` and `.nbp-safe.config` are never protected paths, whatever the
+patterns say: a broad pattern from the remote (`*`) must not make the commit that repairs
+`.nbp-safe` impossible. (The vault index refuses them as entries as well; the exclude block ends
+with `!/.nbp-safe` and `!/.nbp-safe.config`.)
 
 **Index membership.** With the agent unlocked, `pre-commit` and `pre-push` also block any staged or
 pushed path that is a path of the vault index (compared in NFC and case-folded), even when no
@@ -91,12 +118,21 @@ not a valid vault.
 
 `post-commit` seals when the agent is unlocked (silent when there is nothing to seal; a one-line hint
 when locked and protected files exist). `post-merge` and `post-checkout` (branch switches only)
-refresh the exclude block (never relaxing it: see the sticky memory above) and, when unlocked and a
+refresh the exclude block (never relaxing it: see the memory of versions above) and, when unlocked and a
 vault exists, run `open`; locked, they print a hint. They never fail git.
 
 Hooks never ask the password manager on their own. Only `nbp-safe.autoUnlock=true` (opt-in, local
 `.git/config`) lets a hook run `keyCommand`, with the `keyCommand` timeout; on failure the hook
 degrades to the path check and says why.
+
+A hook that cannot talk to the agent degrades the same way. One case is specific to Windows: the
+agent runs **elevated** and the hook does not (or the reverse), so the agent's process token cannot
+be opened and the client cannot check who serves the pipe. That is not treated as an impostor and
+nothing is sent to it: the hook prints `agent unavailable (... elevation ...)`, runs only the path
+check and the vault is not opened or sealed; start git and `nbp-git-safe unlock` from the same kind
+of terminal. `doctor` reports it as a warning. A vault branch this clone has never verified is not
+adopted by a hook either (`post-merge` prints why; adopt it once with `open --confirm-first-adopt`,
+see `MULTI.md`).
 
 ## How the hooks are installed
 

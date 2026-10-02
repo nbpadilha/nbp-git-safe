@@ -159,24 +159,48 @@ def system_temp(
     helpers.SYSTEM_TEMP.clear()
 
 
+def _real_runtime_root() -> Path:
+    """Where the developer's REAL agent state would live (computed from the untouched process
+    environment, before any fixture changes it)."""
+    from nbp_git_safe import agent
+
+    return agent.runtime_root()
+
+
+REAL_RUNTIME_ROOT = _real_runtime_root()
+REAL_RUNTIME_ROOT_EXISTED = REAL_RUNTIME_ROOT.exists()
+
+
 @pytest.fixture(autouse=True)
 def private_runtime_root(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Path]:
     """The agent keeps its state in a per-user directory outside the repository; tests get a
-    throw-away base for it (never the developer's real ``%LOCALAPPDATA%``/``$XDG_RUNTIME_DIR``).
-    The environment variable is what hook subprocesses (run by git) see; the module override is
-    what this process uses, so that a test calling ``monkeypatch.undo()`` cannot send the agent to
-    the real directory."""
+    throw-away base for it (never the developer's real ``%LOCALAPPDATA%`` state or
+    ``~/.cache/nbp-git-safe-<uid>``). The environment variable is what hook subprocesses (run by
+    git) see; the module override is what this process uses, so that a test calling
+    ``monkeypatch.undo()`` cannot send the agent to the real directory. After EVERY test the real
+    directory must still not exist (when it did not before the run): a test that escaped the
+    isolation fails right there, instead of leaving state behind in the developer's profile."""
     from nbp_git_safe import agent
 
     root = tmp_path_factory.mktemp("runtime")
     if sys.platform != "win32":
         root.chmod(0o700)
-    monkeypatch.setenv("LOCALAPPDATA" if sys.platform == "win32" else "XDG_RUNTIME_DIR", str(root))
+    if sys.platform == "win32":
+        monkeypatch.setenv("LOCALAPPDATA", str(root))
+    else:
+        monkeypatch.setenv(agent.RUNTIME_DIR_ENV, str(root / agent.RUNTIME_NAME))
     agent.set_runtime_root(root / agent.RUNTIME_NAME)
     yield root
     agent.clear_runtime_root()
+    if not REAL_RUNTIME_ROOT_EXISTED and REAL_RUNTIME_ROOT.exists():
+        import shutil
+
+        shutil.rmtree(REAL_RUNTIME_ROOT, ignore_errors=True)
+        pytest.fail(
+            f"a test escaped the runtime isolation: {REAL_RUNTIME_ROOT} was created (removed)"
+        )
 
 
 @pytest.fixture(autouse=True)

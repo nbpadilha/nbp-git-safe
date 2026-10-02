@@ -216,9 +216,12 @@ def test_runtime_root_follows_the_platform_conventions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agent.clear_runtime_root()
-    var = "LOCALAPPDATA" if WINDOWS else "XDG_RUNTIME_DIR"
+    # Windows: %LOCALAPPDATA%; elsewhere only the explicit override moves the root (XDG_RUNTIME_DIR
+    # does not: tests/unit/test_review2_unit.py)
+    var = "LOCALAPPDATA" if WINDOWS else agent.RUNTIME_DIR_ENV
+    expected = tmp_path / "base" / agent.RUNTIME_NAME if WINDOWS else tmp_path / "base"
     monkeypatch.setenv(var, str(tmp_path / "base"))
-    assert agent.runtime_root() == tmp_path / "base" / agent.RUNTIME_NAME
+    assert agent.runtime_root() == expected
     monkeypatch.setenv(var, "relative-is-ignored")
     assert agent.runtime_root().is_absolute()
     assert Path("relative-is-ignored") not in agent.runtime_root().parents

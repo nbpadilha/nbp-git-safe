@@ -10,14 +10,14 @@ inside a private (0700) directory, with the peer's uid checked.
 
 Trust (``docs/FORMAT.md`` section 11): ``agent.json`` is NOT a trust anchor. The agent's state
 lives OUTSIDE the repository, in a per-user directory this module creates and re-verifies on every
-use (``%LOCALAPPDATA%\\nbp-git-safe\\<repo hash>`` or ``$XDG_RUNTIME_DIR``/``~/.cache``; owner and
-ACL/mode checked, no links). The connection ``authkey`` is never stored: it is
-``HMAC(agent.secret, nonce)`` where ``agent.secret`` is a random file in that directory and the
-nonce is public (in ``agent.json``). A process that merely plants an ``agent.json`` cannot answer
-the handshake, so it never receives the master key (``unlock`` only ever delivers it to an agent
-this very process started and authenticated) nor plaintext. The client also checks, before
-anything is sent, that the process serving the pipe/socket is the one ``agent.json`` names and
-that it belongs to the current user.
+use (``%LOCALAPPDATA%\\nbp-git-safe\\<repo hash>`` or ``~/.cache/nbp-git-safe-<uid>/<repo hash>``,
+see ``compute_runtime_root``; owner and ACL/mode checked, no links). The connection ``authkey``
+is never stored: it is ``HMAC(agent.secret, nonce)`` where ``agent.secret`` is a random file in
+that directory and the nonce is public (in ``agent.json``). A process that merely plants an
+``agent.json`` cannot answer the handshake, so it never receives the master key (``unlock`` only
+ever delivers it to an agent this very process started and authenticated) nor plaintext. The
+client also checks, before anything is sent, that the process serving the pipe/socket is the one
+``agent.json`` names and that it belongs to the current user.
 
 ``agent.json`` is never used to decide what to delete: the only paths removed are ``agent.json``
 itself and, on POSIX, a socket whose path is exactly ``<state dir>/s-<24 hex>.sock``.
@@ -40,7 +40,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from multiprocessing.connection import Client, Connection, Listener
 from pathlib import Path
@@ -97,6 +97,20 @@ class AgentError(Exception):
 
 class HandshakeError(AgentError):
     """The peer failed the mutual authentication (or spoke another protocol)."""
+
+
+class ProcessInspectionError(HandshakeError):
+    """The process that serves the connection cannot be inspected from this one. On Windows that
+    is what an agent running ELEVATED looks like to a non-elevated hook (or the reverse): the
+    process token is not readable. Nothing is sent to it; the callers degrade to the path check
+    and tell the user why."""
+
+
+ELEVATION_MESSAGE = (
+    "the agent's process cannot be inspected from this one; it probably runs at another "
+    "elevation level (elevated while this process is not, or the reverse): nothing is sent to it, "
+    "only the path check runs. Run git and `nbp-git-safe unlock` from the same kind of terminal"
+)
 
 
 class ProtocolError(AgentError):
@@ -195,12 +209,44 @@ def runtime_root() -> Path:
     if _root_override:
         return _root_override[0]
     if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA")
-        root = Path(base) if base and os.path.isabs(base) else Path.home() / "AppData" / "Local"
-    else:
-        xdg = os.environ.get("XDG_RUNTIME_DIR")
-        root = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".cache"
-    return root / RUNTIME_NAME
+        return compute_runtime_root(sys.platform, os.environ, uid=None, home=Path.home())
+    return compute_runtime_root(
+        sys.platform, os.environ, uid=os.geteuid(), home=_account_home() or Path.home()
+    )
+
+
+RUNTIME_DIR_ENV = "NBP_SAFE_RUNTIME_DIR"
+
+
+def compute_runtime_root(
+    platform: str, env: Mapping[str, str], *, uid: int | None, home: Path
+) -> Path:
+    """The per-user base directory of all agent state, as a pure function of its inputs.
+
+    Windows: ``%LOCALAPPDATA%`` plus ``nbp-git-safe``. Elsewhere
+    ``<home>/.cache/nbp-git-safe-<uid>``, and deliberately NOT ``$XDG_RUNTIME_DIR`` (present in a
+    login session, absent in a hook started by a GUI, cron or another shell: the same repository
+    would get two state roots and the hook would not find the agent) nor ``$HOME`` (the caller
+    passes the account's home from the password database). ``NBP_SAFE_RUNTIME_DIR`` (an absolute
+    path) overrides it explicitly."""
+    override = env.get(RUNTIME_DIR_ENV)
+    if override and os.path.isabs(override):
+        return Path(override)
+    if platform == "win32":
+        base = env.get("LOCALAPPDATA")
+        root = Path(base) if base and os.path.isabs(base) else home / "AppData" / "Local"
+        return root / RUNTIME_NAME
+    return home / ".cache" / f"{RUNTIME_NAME}-{uid}"
+
+
+def _account_home() -> Path | None:
+    """The home directory of the current account from the password database (not ``$HOME``)."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except (ImportError, KeyError, OSError):  # no pwd on Windows; no entry in a minimal container
+        return None
 
 
 def repo_key(state_dir: Path | str) -> str:
@@ -690,14 +736,23 @@ def connect_raw(address: str, family: str) -> Connection:
     return Client(address, family, authkey=None)
 
 
+def _verify_windows(conn: Connection, info: AgentInfo) -> None:
+    pid = winsec.pipe_server_pid(conn._handle)  # type: ignore[attr-defined]
+    if pid != info.pid:
+        raise HandshakeError("agent process is not the expected one")
+    owner = winsec.process_owner_sid(pid)
+    if owner is None:  # the token cannot be read: another elevation level, not "an impostor"
+        raise ProcessInspectionError(ELEVATION_MESSAGE)
+    if owner != winsec.current_user_sid():
+        raise HandshakeError("agent process is not the expected one")
+
+
 def verify_server(conn: Connection, info: AgentInfo) -> None:
     """Before any byte is sent: the process serving this connection must be the one the state
     names and must belong to the current user."""
     try:
         if sys.platform == "win32":
-            pid = winsec.pipe_server_pid(conn._handle)  # type: ignore[attr-defined]
-            if pid != info.pid or not winsec.is_current_user_process(pid):
-                raise HandshakeError("agent process is not the expected one")
+            _verify_windows(conn, info)
         else:
             pid_, uid = _peer_ids(conn)
             if (uid is not None and uid != os.geteuid()) or (pid_ is not None and pid_ != info.pid):

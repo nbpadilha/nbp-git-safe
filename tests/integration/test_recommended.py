@@ -147,7 +147,7 @@ def test_a_git_exe_in_the_current_directory_is_not_run(
     for dll in base.parent.glob("python3*.dll"):
         shutil.copy(dll, planted)
     monkeypatch.chdir(planted)
-    monkeypatch.setattr(gitutil, "_git_exe", [])
+    monkeypatch.setattr(gitutil, "_git_exe", {})
     out = Git(planted).text("--version")
     assert out.startswith("git version"), out
     assert Path(gitutil.git_executable()).parent != planted
