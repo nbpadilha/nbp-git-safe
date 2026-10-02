@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nbp_git_safe import agent, crypto, guard, protect, unlock, vault
+from nbp_git_safe import agent, crypto, guard, multi, protect, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config, ConfigError, load_config
 from nbp_git_safe.gitutil import Git, GitError, Repo, discover, rev_parse
@@ -481,7 +481,15 @@ def post_refresh(args: Sequence[str]) -> int:
             _say(f"vault not opened: {_locked_hint(reason)}, then `nbp-git-safe open`")
             return 0
         with backend:
-            result = vault.open_vault(git, repo, cfg, backend)
+            known: dict[str, frozenset[str]] = {}
+            try:  # bring in what `git pull` just fetched (offline, never forces)
+                synced = multi.sync(git, repo, cfg, backend, fetch=False, seal_first=False)
+                known = synced.known_macs
+                if synced.action in ("fast-forward", "merged"):
+                    _say(f"vault {synced.action} with origin ({synced.conflicts} conflict(s))")
+            except (vault.VaultError, crypto.NbpCryptoError, index_mod.IndexValidationError) as exc:
+                _say(f"warning: the vault was not synced with origin ({exc})")
+            result = vault.open_vault(git, repo, cfg, backend, known)
         if result.written or result.theirs:
             _say(f"vault opened: {len(result.written)} file(s) written")
         for rel in result.theirs:

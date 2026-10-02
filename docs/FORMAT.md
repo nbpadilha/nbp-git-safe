@@ -185,3 +185,18 @@ Handshake messages are limited to 128 bytes and must arrive within 5 s. Requests
 `MAX_BLOB_SIZE + 1 MiB` per message; replies are `u8 proto || u8 status || body` where an error body
 is a short fixed code. Operations: `hello`, `status`, `load_key` (once), `enc_blob`, `dec_blob`,
 `enc_index`, `dec_index`, `mac`, `key_id`, `lock`.
+
+## 12. Merge, rotation and purge commits
+
+* **sync** merge commit: fixed message `nbp-safe: sync`, two parents (local tip first), same fixed
+  identity and rounded timestamp as a seal. Its tree starts from the local tree; entries adopted from
+  the other side bring their blob (same id) or are re-encrypted under a new id (conflict copies).
+  Conflict-copy paths are `<dir>/<stem>.conflict-<8 hex>.<ext>` or `<path>.conflict-<8 hex>`
+  (`-2`, `-3` if taken), always inside the protected set.
+* **rotate** commit: fixed message `nbp-safe: rotate`, no parent, on a new branch `nbp-safe-<suffix>`.
+  New key, new `key_id`, fresh file ids, MACs recomputed, same paths/modes/sizes/timestamps.
+* **purge** rewrites every commit of the branch (same fixed messages, original timestamps, parents
+  mapped); index and tree lose the purged ids.
+* Local state, none of it secret and none of it containing names or content:
+  `.git/nbp-safe/remote-seen.json` (`{"refs": {ref: commit id}}`), `purged.json`
+  (`{ref: tip before the last purge}`), `autopush.json` (refspecs added by `init --auto-push`).

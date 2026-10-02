@@ -14,10 +14,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from nbp_git_safe import agent, crypto, guard, hooks, protect, unlock, vault
+from nbp_git_safe import agent, crypto, guard, hooks, multi, protect, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, rev_parse, split_z
+from nbp_git_safe.gitutil import Git, GitError, Repo, split_z
 
 OK, INFO, WARN, PROBLEM = "ok", "info", "warn", "problem"
 LISTED = 10
@@ -89,28 +89,17 @@ def _stash_findings(git: Git, sources: list[bytes]) -> Finding | None:
     return None
 
 
-def _vault_divergence(git: Git, cfg: Config) -> Finding | None:
-    local = rev_parse(git, cfg.vault_ref + "^{commit}")
-    remote = rev_parse(git, cfg.remote_vault_ref + "^{commit}")
-    if local is None and remote is None:
+def _vault_divergence(git: Git, repo: Repo, cfg: Config) -> Finding | None:
+    status = multi.remote_status(git, repo, cfg)
+    if status.kind in ("no-remote", "in-sync"):
         return None
-    if local is None:
-        return Finding(
-            WARN, "a vault exists on origin but there is no local branch; run `nbp-git-safe init`"
-        )
-    if remote is None or local == remote:
-        return None
-    counts = git.try_run("rev-list", "--left-right", "--count", f"{local}...{remote}")
-    if counts is None:
-        return Finding(WARN, "the local and remote vault histories could not be compared")
-    ahead, behind = (int(x) for x in counts.decode("ascii").split())
-    if ahead and behind:
-        return Finding(
-            WARN, f"the vault diverged from origin ({ahead} ahead, {behind} behind); run sync"
-        )
-    if behind:
-        return Finding(INFO, f"the vault is {behind} commit(s) behind origin; run sync")
-    return Finding(INFO, f"the vault is {ahead} commit(s) ahead of origin (not pushed yet)")
+    if status.alarming:
+        return Finding(PROBLEM, status.message)
+    if status.kind == "purge-pending":
+        return Finding(WARN, status.message)
+    if status.kind in ("diverged", "no-local"):
+        return Finding(WARN, status.message + "; run `nbp-git-safe sync`")
+    return Finding(INFO, status.message + ("; run `nbp-git-safe sync`" if status.behind else ""))
 
 
 def run_doctor(
@@ -243,7 +232,7 @@ def run_doctor(
             add(PROBLEM, f"the vault does not verify: {exc}")
         except agent.AgentError as exc:
             add(WARN, f"could not query the agent: {exc}")
-    divergence = _vault_divergence(git, cfg)
+    divergence = _vault_divergence(git, repo, cfg)
     if divergence:
         found.append(divergence)
     return found

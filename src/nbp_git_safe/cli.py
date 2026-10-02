@@ -10,7 +10,18 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from nbp_git_safe import __version__, agent, crypto, doctor, guard, hooks, protect, unlock, vault
+from nbp_git_safe import (
+    __version__,
+    agent,
+    crypto,
+    doctor,
+    guard,
+    hooks,
+    multi,
+    protect,
+    unlock,
+    vault,
+)
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config, ConfigError, load_config
 from nbp_git_safe.gitutil import Git, GitError, Repo, discover, rev_parse
@@ -103,7 +114,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         for warning in guard.lint_patterns(versioned.read_bytes()):
             _err(f"nbp-git-safe: warning: {warning}")
-    _adopt_remote_vault(git, cfg)
+    _adopt_remote_vault(git, repo, cfg)
     if not args.no_hooks:
         result = hooks.install_hooks(git, repo, with_shim=args.shim)
         by_mechanism: dict[str, list[str]] = {}
@@ -118,12 +129,18 @@ def cmd_init(args: argparse.Namespace) -> int:
             _err(f"nbp-git-safe: {label[mechanism]}: {', '.join(events)}")
         for warning in result.warnings:
             _err(f"nbp-git-safe: warning: {warning}")
+    if args.auto_push:
+        added = multi.enable_auto_push(git, repo, cfg)
+        _err(
+            "nbp-git-safe: auto-push enabled: `git push` also sends the vault"
+            + (f" (refspecs added: {', '.join(added)})" if added else " (already configured)")
+        )
     if args.generate_key:
         return cmd_keygen(args)
     return EXIT_OK
 
 
-def _adopt_remote_vault(git: Git, cfg: Config) -> None:
+def _adopt_remote_vault(git: Git, repo: Repo, cfg: Config) -> None:
     """A vault on origin and no local branch (a fresh clone): track it, so `open` works."""
     if rev_parse(git, cfg.vault_ref) is not None:
         return
@@ -131,6 +148,9 @@ def _adopt_remote_vault(git: Git, cfg: Config) -> None:
         return
     name = cfg.vault_ref.removeprefix("refs/heads/")
     git.run("branch", "--track", name, cfg.remote_vault_ref.removeprefix("refs/remotes/"))
+    tip = rev_parse(git, cfg.vault_ref + "^{commit}")
+    if tip is not None:
+        multi.record_seen(repo, cfg.vault_ref, tip)
     _err(f"nbp-git-safe: created local branch {name} tracking the vault on origin")
 
 
@@ -167,6 +187,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         if input("type 'uninstall' to continue: ").strip() != "uninstall":
             raise CliError("not confirmed; nothing changed")
     removed = hooks.uninstall_hooks(git)
+    removed.extend(f"push refspec removed: {spec}" for spec in multi.disable_auto_push(git, repo))
     if protect.remove_exclude_block(repo):
         removed.append("exclude block removed")
     if protect.remove_gitignore_block(repo):
@@ -199,8 +220,10 @@ def cmd_lock(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     repo, git, cfg = _context(args)
     status = unlock.current_status(repo.state_dir)
+    remote = multi.remote_status(git, repo, cfg)
     if status is None or status["locked"]:
         _out("agent: locked (run `nbp-git-safe unlock`)")
+        _report_remote(remote)
         return EXIT_LOCKED
     _out(f"agent: unlocked (key {status['key_id']}), expires {_fmt_time(status['expires_at'])}")
     with _connect(repo) as backend:
@@ -208,6 +231,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         tip = state.tip[:10] if state.tip else "none"
         _out(f"vault: {cfg.vault_ref} @ {tip} ({len(state.index.entries)} file(s))")
         analysis = vault.analyze(git, repo, cfg, backend, state)
+    _report_remote(remote)
     summary = vault.status_summary(analysis)
     pending = {k: v for k, v in summary.items() if v}
     if not pending:
@@ -219,6 +243,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     for warning in analysis.warnings:
         _err(f"nbp-git-safe: warning: {warning}")
     return EXIT_OK
+
+
+def _report_remote(remote: multi.RemoteStatus) -> None:
+    if remote.kind == "no-remote":
+        return
+    _out(f"origin: {remote.message}")
+    if remote.alarming:
+        _err(f"nbp-git-safe: WARNING: {remote.message}")
 
 
 def _asker() -> Callable[[str], bool] | None:
@@ -347,6 +379,124 @@ def cmd_rm(args: argparse.Namespace) -> int:
     return _report_seal(commit, analysis, plan)
 
 
+def cmd_sync(args: argparse.Namespace) -> int:
+    repo, git, cfg = _context(args)
+    with _connect(repo) as backend:
+        result = multi.sync(
+            git,
+            repo,
+            cfg,
+            backend,
+            fetch=not args.no_fetch,
+            accept_rewrite=args.accept_remote_rewrite,
+        )
+        for note in result.notes:
+            _err(f"nbp-git-safe: note: {note}")
+        if result.sealed:
+            _out(f"sealed local changes -> {result.sealed[:10]}")
+        detail = f" -> {result.commit[:10]}" if result.commit else ""
+        extra = f", {result.conflicts} conflict(s) kept as copies" if result.conflicts else ""
+        _out(f"sync: {result.action}{detail}{extra}")
+        if not args.no_open and rev_parse(git, cfg.vault_ref + "^{commit}"):
+            opened = vault.open_vault(git, repo, cfg, backend, result.known_macs)
+            _out(f"opened: {len(opened.written)} written, {opened.unchanged} unchanged")
+            for rel in opened.theirs:
+                _err(f"nbp-git-safe: local file differs; vault version saved as {rel!r}")
+            for problem in opened.errors:
+                _err(f"nbp-git-safe: error: {problem}")
+            if opened.errors:
+                return EXIT_ERROR
+    return EXIT_OK
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    repo, git, cfg = _context(args)
+    try:
+        with _connect(repo) as backend:
+            vault.seal(git, repo, cfg, backend)
+    except (agent.AgentNotRunningError, agent.AgentLockedError, agent.AgentExpiredError):
+        _err("nbp-git-safe: note: locked, so nothing new was sealed; pushing the vault as it is")
+    tip = multi.push_vault(git, repo, cfg)
+    _out(f"pushed {cfg.vault_ref} @ {tip[:10]} (no force)")
+    return EXIT_OK
+
+
+def _typed_confirmation(expected: str, given: str | None, what: str) -> None:
+    """``--confirm`` text or, in a terminal, a prompt. Anything else is refused."""
+    if given is None:
+        if not sys.stdin or not sys.stdin.isatty():
+            raise multi.ConfirmationError(
+                f'{what} needs a typed confirmation: pass --confirm "{expected}"'
+            )
+        given = input(f'{what}: type "{expected}" to continue: ').strip()
+    multi.check_confirmation(expected, given)
+
+
+def cmd_rotate(args: argparse.Namespace) -> int:
+    repo, git, cfg = _context(args)
+    old_ref = cfg.vault_ref
+    expected = multi.confirmation_text("delete", old_ref)
+    if args.delete_old and args.confirm is not None:
+        multi.check_confirmation(expected, args.confirm)  # fail before doing any work
+    with _connect(repo) as backend:
+        backend.key_id()  # fail closed (locked) before any key is generated or shown
+        new_master = crypto.generate_key()
+        _err(
+            "nbp-git-safe: the NEW key is shown ONCE (stdout) and is not saved anywhere. Store it "
+            "in your password manager now; the old branch stays until you delete it."
+        )
+        _out(crypto.encode_key(new_master))
+        sys.stdout.flush()
+        result = multi.rotate(git, repo, cfg, backend, new_master, name=args.name)
+    del new_master
+    short = result.ref.removeprefix("refs/heads/")
+    _err(
+        f"nbp-git-safe: {result.files} file(s) re-encrypted into {result.ref} @ "
+        f"{result.tip[:10]} (verified with the new key; fresh file ids, no history)"
+    )
+    _err("next steps:")
+    _err("  1. replace the key in your password manager item used by keyCommand")
+    _err(f"  2. git config nbp-safe.vaultRef {result.ref}")
+    _err("  3. nbp-git-safe lock && nbp-git-safe unlock")
+    _err(f"  4. git push origin {short}   (never forced)")
+    if args.delete_old:
+        _typed_confirmation(expected, args.confirm, "delete the old local vault branch")
+        multi.delete_old_vault(git, old_ref, result.old_tip)
+        _err(
+            f"nbp-git-safe: deleted local {old_ref}. Its objects stay until pruned; the "
+            f"remote copy is deleted only by you: git push origin :{old_ref}"
+        )
+    else:
+        _err("  5. when sure, delete the old branch yourself, or re-run with --delete-old")
+    return EXIT_OK
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    repo, git, cfg = _context(args)
+    expected = multi.confirmation_text("purge", cfg.vault_ref)
+    _err(
+        "nbp-git-safe: purge REWRITES the local history of the vault branch to erase the chosen "
+        "paths. The remote then needs a FORCED push, which this tool never does for you."
+    )
+    _typed_confirmation(expected, args.confirm, "purge")
+    paths = [_relpath(repo, p, args) for p in args.paths]
+    with _connect(repo) as backend:
+        result = multi.purge(git, repo, cfg, backend, paths)
+    noun = "entry" if len(result.removed_ids) == 1 else "entries"
+    _out(
+        f"purged {len(result.removed_ids)} {noun}; "
+        f"{cfg.vault_ref} is now @ {(result.new_tip or '')[:10]}"
+    )
+    _err("nbp-git-safe: still to do by YOU (owner):")
+    for line in multi.purge_instructions(cfg, result):
+        _err(f"  {line}")
+    _err(
+        "nbp-git-safe: the plain file(s) in the working tree are untouched and would be sealed "
+        "again: delete them or take them out of the protected set"
+    )
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------------- parser
 
 
@@ -377,6 +527,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also install hook-file shims (for clients that ignore hooks set by git config)",
     )
     p.add_argument("--no-hooks", action="store_true", help="do not install any hook")
+    p.add_argument(
+        "--auto-push",
+        action="store_true",
+        help="make a plain `git push` carry the vault branch (sets remote.origin.push)",
+    )
     p = add("unlock", cmd_unlock, "run keyCommand and hand the key to the agent")
     p.add_argument("--ttl", help="agent lifetime, e.g. 8h, 30m (default 8h)")
     p.add_argument("--idle-timeout", dest="idle_timeout", help="lock after this much inactivity")
@@ -399,6 +554,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("rm", cmd_rm, "remove a file from the vault and delete it from the working tree")
     p.add_argument("path")
     p.add_argument("--force", action="store_true", help="even if the local file has unsealed edits")
+    p = add("sync", cmd_sync, "fetch, merge (three-way, no force) and open the vault")
+    p.add_argument("--no-fetch", action="store_true", help="merge what was already fetched")
+    p.add_argument("--no-open", action="store_true", help="do not materialize files afterwards")
+    p.add_argument(
+        "--accept-remote-rewrite",
+        action="store_true",
+        help="proceed although origin's vault went backwards or was replaced (check first!)",
+    )
+    add("push", cmd_push, "push the vault branch to origin (never forced)")
+    p = add("rotate", cmd_rotate, "re-encrypt the current state under a new key into a new branch")
+    p.add_argument("--name", help="new branch name (default nbp-safe-<year>)")
+    p.add_argument("--delete-old", action="store_true", help="then delete the old local branch")
+    p.add_argument("--confirm", help='typed confirmation for --delete-old ("delete <branch>")')
+    p = add("purge", cmd_purge, "erase paths from the whole vault history (typed confirmation)")
+    p.add_argument("paths", nargs="+")
+    p.add_argument("--confirm", help='typed confirmation ("purge <branch>")')
     p = add("hook", cmd_hook, "run a hook handler (called by git, not by hand)")
     p.add_argument("event", choices=hooks.EVENTS)
     p.add_argument("hook_args", nargs=argparse.REMAINDER)
