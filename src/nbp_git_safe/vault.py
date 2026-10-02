@@ -31,7 +31,7 @@ from typing import Any, Protocol
 from nbp_git_safe import crypto, protect
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
-from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, hash_object, rev_parse
+from nbp_git_safe.gitutil import Git, GitError, Repo, chunked, hash_objects, rev_parse
 from nbp_git_safe.index import Entry, Index, IndexValidationError, normalize_path, validate_path
 from nbp_git_safe.statcache import StatCache, path_key_input
 
@@ -496,13 +496,15 @@ def build_commit(
     try:
         if base_tree is not None:
             git.run("read-tree", base_tree, extra_env=env)
+        written = sorted((blobs or {}).items())
+        shas = hash_objects(git, [GITATTRIBUTES, README, index_blob, *(b for _, b in written)])
         cacheinfo: list[str] = [
-            f"100644,{hash_object(git, GITATTRIBUTES)},.gitattributes",
-            f"100644,{hash_object(git, README)},README.md",
-            f"100644,{hash_object(git, index_blob)},{INDEX_PATH}",
+            f"100644,{shas[0]},.gitattributes",
+            f"100644,{shas[1]},README.md",
+            f"100644,{shas[2]},{INDEX_PATH}",
         ]
-        for fid, blob in sorted((blobs or {}).items()):
-            cacheinfo.append(f"100644,{hash_object(git, blob)},{STORE_PREFIX}{fid}")
+        for (fid, _blob), sha in zip(written, shas[3:], strict=True):
+            cacheinfo.append(f"100644,{sha},{STORE_PREFIX}{fid}")
         for fid, sha in sorted((blob_shas or {}).items()):
             cacheinfo.append(f"100644,{sha},{STORE_PREFIX}{fid}")
         for chunk in chunked(cacheinfo, UPDATE_INDEX_CHUNK):

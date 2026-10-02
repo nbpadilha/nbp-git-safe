@@ -7,6 +7,7 @@ configured or invoked by this tool; blobs are written with ``--no-filters``.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -126,6 +127,58 @@ def split_z(data: bytes) -> list[str]:
 def hash_object(git: Git, data: bytes) -> str:
     """Write ``data`` as a blob without any filter and return its object id."""
     return git.text("hash-object", "-w", "--stdin", "--no-filters", input=data).strip()
+
+
+def _object_format(git: Git) -> str:
+    out = git.try_run("rev-parse", "--show-object-format")
+    return out.decode("ascii").strip() if out else "sha1"
+
+
+def hash_objects(git: Git, blobs: Sequence[bytes]) -> list[str]:
+    """Write many blobs (no filter) with ONE ``git fast-import`` process; return their ids in order.
+
+    ``hash-object -w`` costs a process per blob (about 40 ms on Windows), which made the first seal
+    of thousands of files take minutes. The ids are computed here (SHA-1 object format; any other
+    format falls back to one ``hash-object`` per blob) and then checked against the object
+    database: an id git cannot find is an error, never a guess."""
+    if not blobs:
+        return []
+    if _object_format(git) != "sha1":
+        return [hash_object(git, blob) for blob in blobs]
+    ids = [
+        hashlib.sha1(b"blob %d\0" % len(blob) + blob, usedforsecurity=False).hexdigest()
+        for blob in blobs
+    ]
+    proc = subprocess.Popen(
+        ["git", "fast-import", "--quiet", "--done"],  # noqa: S607 - git is resolved via PATH
+        cwd=git.cwd,
+        env=git.env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    if proc.stdin is None or proc.stderr is None:
+        raise GitError("git fast-import: no pipes")
+    try:
+        for blob in blobs:
+            proc.stdin.write(b"blob\ndata %d\n" % len(blob))
+            proc.stdin.write(blob)
+            proc.stdin.write(b"\n")
+        proc.stdin.write(b"done\n")
+        proc.stdin.close()
+    except OSError:  # BrokenPipeError: git exited early, its stderr says why
+        pass
+    err = proc.stderr.read()
+    code = proc.wait()
+    proc.stderr.close()
+    if code != 0:
+        detail = err.decode("utf-8", "replace").strip().splitlines()
+        raise GitError(f"git fast-import failed ({code}): {' '.join(detail[:3])}")
+    wanted = "".join(f"{sha}\n" for sha in ids).encode("ascii")
+    checked = git.text("cat-file", "--batch-check", input=wanted).splitlines()
+    if len(checked) != len(ids) or any(" blob " not in line for line in checked):
+        raise GitError("git fast-import did not store every blob")
+    return ids
 
 
 def rev_parse(git: Git, rev: str) -> str | None:

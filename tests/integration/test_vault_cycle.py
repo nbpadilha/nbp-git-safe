@@ -759,3 +759,28 @@ def test_disk_full_while_opening_leaves_no_partial_files(
     monkeypatch.undo()
     assert clone.cli("open").code == 0  # retry succeeds
     assert (clone.path / victim).exists()
+
+
+def test_seal_writes_all_blobs_without_one_process_per_file(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (found by a rehearsal on thousands of files): sealing must not spawn one
+    ``git hash-object`` per blob (about 40 ms each on Windows); the blobs go in one batch."""
+    for i in range(30):
+        env.repo.write(f"reports/bulk-{i}.csv", f"{env.repo.canaries[0]},{i}\n" * 20)
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spying(
+        argv: list[str], *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append([str(a) for a in argv])
+        return real_run(argv, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "run", spying)
+    sealed = env.seal()
+    assert sealed.code == 0, sealed.err
+    hash_object_calls = [c for c in calls if c[:2] == ["git", "hash-object"]]
+    assert not hash_object_calls
+    assert len(env.vault_files()) >= 30 + 3
+    env.gate()
