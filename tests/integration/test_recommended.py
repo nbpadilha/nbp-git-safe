@@ -49,7 +49,13 @@ def test_an_nfd_name_is_caught_by_an_nfc_pattern_at_commit_time(hooked: Env) -> 
     repo.write(nfd, f"secret {repo.canaries[2]}\n")
     repo.sh("add", "-A")  # git compares bytes: layer 1 cannot see it, layer 2 can
     blocked = commit(repo, "x")
-    assert blocked.returncode != 0 and "matches the protected set" in blocked.stderr
+    if sys.platform == "darwin":
+        # macOS git (core.precomposeunicode) normalises the name to NFC itself, so the exclude
+        # block (layer 1) already ignores it: nothing is staged and no commit is made.
+        assert blocked.returncode != 0
+        assert not [n for n in repo.sh("ls-files").splitlines() if "anual" in n]
+    else:
+        assert blocked.returncode != 0 and "matches the protected set" in blocked.stderr
     prune_unreachable(repo)
 
 
