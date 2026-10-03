@@ -5,7 +5,7 @@ Keep sensitive files in an ordinary Git repository, **encrypted**, with the late
 The key is never written to disk: it lives in the memory of a small local agent that is fed by your
 password manager.
 
-> **Status: 0.1.0 in preparation. Not audited by any third party.** The cryptography is
+> **Status: 0.1.1 in preparation. Not audited by any third party.** The cryptography is
 > `AES-SIV` / `HKDF-SHA256` / `HMAC-SHA256` from the `cryptography` package (no home-made
 > construction), but the project is young. Read [SECURITY.md](SECURITY.md) and
 > [THREAT_MODEL.md](THREAT_MODEL.md) before trusting it with anything you cannot afford to lose.
@@ -84,7 +84,7 @@ Requires Python 3.11+ and git 2.54+ (older git works with hook shims; 2.55 is wh
 was run on).
 
 ```
-uv tool install nbp-git-safe==0.1.0      # once published
+uv tool install nbp-git-safe==0.1.1      # once published
 # from a checkout today:
 uv tool install .
 ```
@@ -144,7 +144,7 @@ identity), `rm <path>`, `doctor` (checks the setup), `lock`.
 
 ```
 git clone <url> && cd <repo>
-uv tool install nbp-git-safe==0.1.0
+uv tool install nbp-git-safe==0.1.1
 git config nbp-safe.keyCommand '["op","document","get","<ITEM_ID>","--vault","<VAULT_ID>"]'
 nbp-git-safe init       # hooks, exclude block, local branch tracking origin/nbp-safe
 nbp-git-safe unlock

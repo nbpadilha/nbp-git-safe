@@ -2,7 +2,7 @@
 
 ## Status
 
-nbp-git-safe is pre-release (0.1.0 in preparation) software. **It has not been audited by any third
+nbp-git-safe is pre-release (0.1.1 in preparation) software. **It has not been audited by any third
 party.** The cryptography is built only from `AES-SIV`, `HKDF-SHA256` and `HMAC-SHA256` of the
 `cryptography` package, with RFC 5297 test vectors in the suite, but the vault layout, the key agent
 and the git integration are new code. Do not rely on it for data whose exposure would be
