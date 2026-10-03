@@ -174,9 +174,24 @@ REAL_RUNTIME_ROOT = _real_runtime_root()
 REAL_RUNTIME_ROOT_EXISTED = REAL_RUNTIME_ROOT.exists()
 
 
+@pytest.fixture(scope="session")
+def short_runtime_dirs() -> Iterator[list[str]]:
+    """Short POSIX runtime roots made during the session. They are removed here, after the last
+    test: a per-test removal would run while a test's own monkeypatching (``os.open``) is still
+    in force."""
+    import shutil
+
+    made: list[str] = []
+    yield made
+    for path in made:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def private_runtime_root(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    short_runtime_dirs: list[str],
 ) -> Iterator[Path]:
     """The agent keeps its state in a per-user directory outside the repository; tests get a
     throw-away base for it (never the developer's real ``%LOCALAPPDATA%`` state or
@@ -205,10 +220,6 @@ def private_runtime_root(
     agent.set_runtime_root(root / agent.RUNTIME_NAME)
     yield root
     agent.clear_runtime_root()
-    if short is not None:
-        import shutil
-
-        shutil.rmtree(short, ignore_errors=True)
     if not REAL_RUNTIME_ROOT_EXISTED and REAL_RUNTIME_ROOT.exists():
         import shutil
 
