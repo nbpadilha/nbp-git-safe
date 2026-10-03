@@ -759,7 +759,9 @@ class _UnixListener:
     first barrier, the peer uid the second)."""
 
     def __init__(self, address: str) -> None:
-        self._listener = Listener(address, "AF_UNIX", authkey=None)
+        # The stdlib default backlog is 1: on macOS a burst of clients (parallel git hooks) is then
+        # refused (ECONNREFUSED) while the agent is busy accepting; allow a real queue.
+        self._listener = Listener(address, "AF_UNIX", backlog=2 * MAX_CONNECTIONS, authkey=None)
         with contextlib.suppress(OSError):
             os.chmod(address, 0o600)
 

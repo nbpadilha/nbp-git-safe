@@ -86,7 +86,7 @@ def test_unlock_flow_with_stub_spawn(master_key: bytes, tmp_path: Path) -> None:
         assert newly is False and len(created) == 1  # already unlocked: nothing spawned
         assert unlock.current_status(tmp_path)["locked"] is False  # type: ignore[index]
         assert unlock.lock(tmp_path) is True
-        assert created[0].exited.is_set()
+        assert created[0].exited.wait(5)  # the exit callback runs just after the record is gone
         assert unlock.current_status(tmp_path) is None
         assert unlock.lock(tmp_path) is False
     finally:
