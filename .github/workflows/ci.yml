@@ -35,7 +35,7 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check
       - name: Unit tests (fast feedback, no coverage)
-        run: uv run pytest -q --no-cov -x tests/unit
+        run: uv run pytest -q --no-cov tests/unit
 
   test:
     needs: quick
