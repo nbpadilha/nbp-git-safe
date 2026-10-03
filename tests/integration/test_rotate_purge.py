@@ -5,15 +5,17 @@ and the automatic vault sync after ``git pull``."""
 
 from __future__ import annotations
 
+import shlex
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from nbp_git_safe import crypto, multi, vault
 from nbp_git_safe.config import load_config
 from nbp_git_safe.gitutil import discover
-from tests.helpers import ThreadAgent
+from tests.helpers import NbpRepo, ThreadAgent
 from tests.integration.conftest import Env
 from tests.integration.guardkit import commit, first_protected, remote_refs
 from tests.integration.test_multi import Machines, machines, seal_by_commit  # noqa: F401
@@ -243,6 +245,38 @@ def all_blob_shas_for(env: Env, tips: list[str], fid: str) -> set[str]:
     return shas
 
 
+def printed_commands(stderr: str) -> list[str]:
+    """The git commands a command prints for the owner (indented ``git ...`` lines)."""
+    return [ln.strip() for ln in stderr.splitlines() if ln.strip().startswith("git ")]
+
+
+def run_printed(env: Env, line: str, cwd: Path) -> None:
+    """Run one printed command as the owner would (the trailing ``# explanation`` is a comment)."""
+    args = shlex.split(line.split("#", 1)[0])
+    assert args[0] == "git", line
+    env.git.run(*args[1:], cwd=cwd)
+
+
+def assert_gone_from_the_object_database(repo: NbpRepo, shas: set[str]) -> None:
+    """``git cat-file -e`` fails for every sha. If one is still there it must at least be
+    unreachable (checked by the caller); ``gc --prune=now`` is repeated a few times for a file that
+    was locked by a scanner, and the failure message says whether the object is loose or packed."""
+    for _attempt in range(3):
+        if all(repo.raw("cat-file", "-e", sha).returncode != 0 for sha in shas):
+            return
+        repo.sh("gc", "-q", "--prune=now")
+    lingering = {sha: repo.raw("cat-file", "-e", sha).returncode == 0 for sha in shas}
+    loose = {
+        sha: (repo.path / ".git" / "objects" / sha[:2] / sha[2:]).exists()
+        for sha, here in lingering.items()
+        if here
+    }
+    raise AssertionError(
+        f"purged blobs still in the object database: loose={loose}, "
+        f"count-objects={repo.sh('count-objects', '-v')!r}"
+    )
+
+
 def test_purge_rewrites_the_history_and_prints_what_the_owner_must_do(hooked: Env) -> None:
     repo = hooked.repo
     target, _marker, tips = make_history(hooked)
@@ -309,20 +343,20 @@ def test_purge_rewrites_the_history_and_prints_what_the_owner_must_do(hooked: En
     )
     assert forced.returncode == 0, forced.stderr
     assert remote_refs(hooked)["refs/heads/nbp-safe"] == new_tip
-    hooked.git.run(
-        "reflog",
-        "expire",
-        "--expire=now",
-        "refs/heads/nbp-safe",
-        "refs/remotes/origin/nbp-safe",
-        cwd=repo.path,
-    )
-    hooked.git.run("prune", "--expire", "now", cwd=repo.path)
+    # then the commands the tool PRINTED, literally (the product's instruction is what is tested,
+    # not a hand-made variant of it): expire the reflogs, then gc with --prune=now
+    for line in printed_commands(done.err)[1:]:
+        run_printed(hooked, line, repo.path)
     hooked.git.run("gc", "-q", "--prune=now", cwd=hooked.bare)
     reachable = hooked.git.run("rev-list", "--objects", "refs/heads/nbp-safe", cwd=hooked.bare)
     assert not any(sha in reachable for sha in old_blobs)  # gone from the remote history
-    for sha in old_blobs:  # and from the local object database
-        assert repo.raw("cat-file", "-e", sha).returncode != 0
+    # The guarantee is REACHABILITY: no ref, no reflog, no index and no stash can lead to a purged
+    # blob any more. (Whether the unreachable loose file is already unlinked is the file system's
+    # business: on Windows an antivirus scanner or the search indexer may hold a freshly written
+    # object for a moment and git skips it with a warning, so that is retried below.)
+    alive = repo.sh("rev-list", "--objects", "--all", "--reflog", "--indexed-objects")
+    assert not any(sha in alive for sha in old_blobs)
+    assert_gone_from_the_object_database(repo, old_blobs)
     assert "sync: up-to-date" in repo.cli("sync", "--no-open").out
     repo.assert_no_leak(hooked.bare)
 
