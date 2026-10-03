@@ -143,10 +143,13 @@ def run_doctor(
         )
 
     # --- exclude block and patterns
-    if not (repo.toplevel / protect.VERSIONED_PATTERNS).is_file() and not any(
-        protect.pattern_files(repo)
-    ):
-        add(WARN, "no .nbp-safe (and no .git/info/nbp-safe): nothing is protected yet")
+    working: bytes | None = None
+    try:
+        working = protect.working_patterns(repo)
+        if working is None and not protect.pattern_texts(repo):
+            add(WARN, "no .nbp-safe (and no .git/info/nbp-safe): nothing is protected yet")
+    except GitError as exc:  # an unsafe .nbp-safe, or a memory that cannot be read
+        add(PROBLEM, f"the pattern files cannot be used ({exc}); the hooks refuse to run on it")
     if not protect.has_exclude_block(repo):
         add(
             PROBLEM,
@@ -156,9 +159,8 @@ def run_doctor(
         add(WARN, "the exclude block is out of date with the patterns; run `nbp-git-safe init`")
     else:
         add(OK, "exclude block present and current")
-    versioned = repo.toplevel / protect.VERSIONED_PATTERNS
-    if versioned.is_file():
-        for warning in guard.lint_patterns(versioned.read_bytes()):
+    if working is not None:
+        for warning in guard.lint_patterns(working):
             add(WARN, warning)
     if cfg.raised_versioned_keys:
         add(

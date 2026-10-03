@@ -200,9 +200,8 @@ def pattern_sources(
                 local_versions.append(data)
     if refresh:
         protect.record_versions(repo, local_versions)
-    for pf in protect.pattern_files(repo):
-        texts.append(pf.read_bytes())
-    unique = [t for t in dict.fromkeys(protect.normalize(t) for t in texts) if t]
+    texts.extend(protect.pattern_texts(repo))
+    unique = [t for t in dict.fromkeys(protect.normalize_pattern_text(t) for t in texts) if t]
     keep = protect.prune_dominated([protect.lines_of(t) for t in unique])
     return [unique[i] for i in keep]
 
@@ -287,20 +286,9 @@ def content_violations(
 
 
 def pattern_lines(data: bytes | None) -> list[str]:
-    """Meaningful pattern lines of a ``.nbp-safe`` text (no blanks, comments or our markers)."""
-    if data is None:
-        return []
-    lines = []
-    for raw in data.decode("utf-8", "surrogateescape").split("\n"):
-        line = raw.rstrip("\r")
-        if (
-            not line.strip()
-            or line.startswith("#")
-            or line in (protect.BLOCK_BEGIN, protect.BLOCK_END)
-        ):
-            continue
-        lines.append(line)
-    return lines
+    """Meaningful pattern lines of a ``.nbp-safe`` text, read exactly as git reads them (the one
+    implementation is ``protect.lines_of``)."""
+    return [] if data is None else protect.lines_of(data)
 
 
 def unprotect_check(git: Git, environ: dict[str, str] | None = None) -> Report:
@@ -362,12 +350,18 @@ def lint_patterns(text: bytes | str) -> list[str]:
     segment. It can over-warn (``Final_Report``); patterns should be generic anyway. Only line
     numbers are reported, so the warning itself leaks nothing into logs."""
     raw = text.decode("utf-8", "surrogateescape") if isinstance(text, bytes) else text
+    raw = raw.removeprefix(chr(0xFEFF))  # git skips a leading BOM
     warnings: list[str] = []
     for number, raw_line in enumerate(raw.split("\n"), start=1):
-        line = raw_line.rstrip("\r")
-        if not line.strip() or line.startswith("#"):
+        line = protect.clean_pattern_line(raw_line)
+        if line is None:
             continue
-        if _EMAIL_RE.search(line):
+        if protect.BLOCK_BEGIN in line or protect.BLOCK_END in line:
+            warnings.append(
+                f"{VERSIONED_PATTERNS} line {number} contains a marker of the managed exclude "
+                "block; it is escaped there (the pattern still means the same)"
+            )
+        elif _EMAIL_RE.search(line):
             warnings.append(
                 f"{VERSIONED_PATTERNS} line {number} looks like an e-mail address; keep patterns "
                 "generic (put personal names in .git/info/nbp-safe)"
@@ -428,9 +422,16 @@ def _check_changes(
     pattern, or is a path of the vault index (a sealed file stays protected even when no pattern
     covers it any more), or (agent unlocked) its content equals protected content. Violations are
     appended to ``report``; returns the ``(path, commit)`` keys that were flagged."""
-    # our own configuration files are never "protected paths" (a broad pattern from the remote must
-    # not make the commit that repairs ``.nbp-safe`` impossible)
-    changes = [c for c in changes if c.path.casefold() not in protect.EXEMPT_PATHS]
+    # Our own configuration files are never "protected PATHS" (a broad pattern from the remote must
+    # not make the commit that repairs ``.nbp-safe`` impossible). The exemption is by path only:
+    # their CONTENT is still compared with the protected content below, so copying a protected
+    # file's bytes into ``.nbp-safe.config`` does not get it through. The comparison is
+    # ``protect.is_exempt`` folds case only where the file system does (``core.ignorecase``): on a
+    # case-sensitive one ``.NBP-SAFE`` is a different, ordinary file, and counts as protected when
+    # a pattern covers it (the decision is to protect more).
+    everything = list(changes)
+    fold = protect.ignore_case(git)
+    changes = [c for c in changes if not protect.is_exempt(c.path, fold)]
     if sources:  # our own temp and conflict files never go to the main branch either
         sources = [*sources, protect.managed_suffix_text()]
     matched = protected_among(git, sources, (c.path for c in changes)) if sources else set()
@@ -448,7 +449,7 @@ def _check_changes(
         seen.add(key)
         report.violations.append(Violation("path", change.path, detail))
     if backend is not None and prints is not None:
-        rest = [c for c in changes if (c.path, c.commit) not in seen]
+        rest = [c for c in everything if (c.path, c.commit) not in seen]
         report.violations.extend(content_violations(git, backend, prints, rest))
     return seen
 
@@ -706,7 +707,23 @@ def check_vault_ref(
         state = vault.load_commit(git, backend, update.local_oid)  # type: ignore[arg-type]
         # the index chain: a replayed older index or a branch that went back is not pushed
         known = vault.read_verified(repo).get(update.local_ref)
-        trusted = known[0] if known and is_ancestor(git, known[0], update.local_oid) else None
+        # The branch as it is NOW (the hook sealed before this check, so it may be newer than the
+        # commit git is pushing): it must contain the newest tip this clone verified. A pushed
+        # commit older than that is this clone's own past, not a rollback of the branch.
+        now = rev_parse(git, update.local_ref + "^{commit}") or update.local_oid
+        if known is not None and not (known[0] == now or is_ancestor(git, known[0], now)):
+            report.violations.append(
+                Violation(
+                    "vault",
+                    update.local_oid[:10],
+                    "the vault branch does not contain the newest vault state this clone "
+                    "verified (it went back, or its history was replaced); pushing it would roll "
+                    "origin back. If that is deliberate, adopt it first with `nbp-git-safe sync "
+                    "--accept-remote-rewrite`",
+                )
+            )
+            return report
+        trusted = known[0] if known else None
         vault.verify_chain(git, backend, update.local_oid, trusted=trusted)  # type: ignore[arg-type]
     except (vault.VaultError, crypto.NbpCryptoError) as exc:
         report.violations.append(

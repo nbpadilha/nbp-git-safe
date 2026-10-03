@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nbp_git_safe import plainfile
 from nbp_git_safe.crypto import MAX_BUCKET
 from nbp_git_safe.gitutil import Git, GitError, Repo, split_z
 
@@ -199,8 +200,11 @@ def _local_layer(git: Git) -> dict[str, str]:
 
 def _versioned_layer(git: Git, repo: Repo) -> tuple[dict[str, str], list[str]]:
     path = repo.toplevel / VERSIONED_CONFIG_NAME
-    if not path.is_file():
-        return {}, []
+    try:  # a link (or junction, or special file) would make git read a file outside the repo
+        if not plainfile.check_plain_file(path):
+            return {}, []
+    except plainfile.UnsafeFileError as exc:
+        raise ConfigError(f"{exc}") from None
     try:
         out = git.run("config", "--file", str(path), "-z", "--list")
     except GitError:

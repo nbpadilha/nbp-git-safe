@@ -238,11 +238,11 @@ def test_version_memory_semantics(isolated_git, tmp_path: Path) -> None:  # type
     assert sorted(version_texts(repo)) == [["a/", "!a/keep.txt", "b/"], ["c/", "!c/x"]]
     assert protect.block_lines(repo)[:4] == ["c/", "!c/x", "a/", "b/"]
     # the file and the remembered copy of its own version are one source; the old one is another
-    assert len(protect.pattern_files(repo)) == 2
+    assert len(protect.pattern_texts(repo)) == 2
 
     (root / ".nbp-safe").unlink()  # the whole file deleted upstream
     assert sorted(protect.sticky_only(repo)) == ["a/", "b/", "c/"]
-    assert len(protect.pattern_files(repo)) == 2
+    assert len(protect.pattern_texts(repo)) == 2
 
     removed = protect.unprotect(git, repo, "a/")
     assert removed.status == "removed" and removed.live == ()
@@ -263,7 +263,7 @@ def test_a_version_that_only_adds_patterns_keeps_a_legitimate_negation_working( 
     lines = protect.block_lines(repo)
     assert lines[:3] == ["*.csv", "!keep.csv", "extra/"]
     assert "*.csv" not in lines[3:]  # the older version is covered: it does not re-add the glob
-    assert len(protect.pattern_files(repo)) == 1  # ... and costs no extra matching run
+    assert len(protect.pattern_texts(repo)) == 1  # ... and costs no extra matching run
 
 
 def test_extra_versions_are_remembered(isolated_git, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]

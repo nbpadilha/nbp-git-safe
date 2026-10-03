@@ -118,11 +118,11 @@ def cmd_init(args: argparse.Namespace) -> int:
             + ("installed" if changed else "already up to date")
             + " (a versioned file: commit it)"
         )
-    versioned = repo.toplevel / protect.VERSIONED_PATTERNS
-    if not versioned.is_file():
+    working = protect.working_patterns(repo)
+    if working is None:
         _err("nbp-git-safe: note: no .nbp-safe file yet; add gitignore-style patterns there")
     else:
-        for warning in guard.lint_patterns(versioned.read_bytes()):
+        for warning in guard.lint_patterns(working):
             _err(f"nbp-git-safe: warning: {warning}")
     _adopt_remote_vault(git, repo, cfg, confirm=args.confirm_first_adopt)
     if not args.no_hooks:

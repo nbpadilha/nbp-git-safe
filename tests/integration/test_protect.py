@@ -133,7 +133,7 @@ def test_no_pattern_files_means_empty_set(isolated_git: IsolatedGit, tmp_path: P
     root = isolated_git.init(tmp_path / "bare-tree")
     (root / "f.txt").write_text("x")
     repo, git = discover(root, isolated_git.env)
-    assert protect.pattern_files(repo) == []
+    assert protect.pattern_texts(repo) == []
     assert protect.list_protected(git, repo) == []
     assert protect.match_paths(git, repo, ["f.txt"]) == set()
     assert protect.match_paths(git, repo, []) == set()
