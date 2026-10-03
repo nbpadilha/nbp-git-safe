@@ -183,7 +183,28 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """A process that has exited but was not reaped by its parent still answers ``kill(pid, 0)``;
+    it holds no key and serves nothing, so it is not "alive" (an orphan whose reaper is slow, or a
+    container whose init never reaps, must not look like a running agent)."""
+    try:
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{pid}/stat", "rb") as handle:
+                raw = handle.read()
+            state = raw[raw.rfind(b")") + 1 :].split()[0]
+            return state in (b"Z", b"X")
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        return proc.stdout.strip().startswith(b"Z")
+    except (OSError, IndexError, subprocess.SubprocessError):
+        return False
 
 
 # ------------------------------------------------------------------------------- state

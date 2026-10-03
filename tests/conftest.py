@@ -72,8 +72,11 @@ class IsolatedGit:
 @pytest.fixture
 def isolated_git(monkeypatch: pytest.MonkeyPatch) -> IsolatedGit:
     env = dict(os.environ)
+    runtime_dir = env.get("NBP_SAFE_RUNTIME_DIR")  # hooks must find the same (test) state root
     for name in [n for n in env if n.startswith(("GIT_", "NBP_SAFE_"))]:
         del env[name]
+    if runtime_dir:
+        env["NBP_SAFE_RUNTIME_DIR"] = runtime_dir
     config = {
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",

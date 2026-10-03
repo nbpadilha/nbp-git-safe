@@ -36,6 +36,8 @@ jobs:
         run: uv run ruff check
       - name: Unit tests (fast feedback, no coverage)
         run: uv run pytest -q --no-cov tests/unit
+      - name: Integration tests (fast feedback, no coverage)
+        run: uv run pytest -q --no-cov tests/integration
 
   test:
     needs: quick
