@@ -2,7 +2,7 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
-## 0.1.1 - unreleased
+## 0.1.1 - 2026-10-03
 
 ### Fixed
 
