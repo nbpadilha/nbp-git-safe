@@ -28,9 +28,14 @@ KEY = bytes(range(64))
 def _address() -> tuple[str, str]:
     if sys.platform == "win32":
         return rf"\\.\pipe\nbp-test-{secrets.token_hex(6)}", "AF_PIPE"
+    import atexit
+    import shutil
     import tempfile
 
-    return str(Path(tempfile.mkdtemp(prefix="nbp-t-")) / "s"), "AF_UNIX"
+    # a SHORT directory (sun_path is ~104 bytes; the per-test TMPDIR is long); removed at exit
+    short = tempfile.mkdtemp(prefix="nbp-t-", dir="/tmp")
+    atexit.register(shutil.rmtree, short, ignore_errors=True)
+    return str(Path(short) / "s"), "AF_UNIX"
 
 
 @pytest.fixture

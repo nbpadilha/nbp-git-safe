@@ -155,7 +155,7 @@ def test_connect_to_unreachable_address_reports_not_running(tmp_path: Path) -> N
     info = agent.AgentInfo(
         r"\\.\pipe\nbp-git-safe-does-not-exist-xyz"
         if sys.platform == "win32"
-        else str(tmp_path / "nope.sock"),
+        else f"/tmp/nbp-nope-{os.getpid()}.sock",  # noqa: S108
         "AF_PIPE" if sys.platform == "win32" else "AF_UNIX",
         os.urandom(32),
         os.getpid(),
