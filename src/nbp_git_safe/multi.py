@@ -541,7 +541,9 @@ def sync(
         and rev_parse(git, cfg.remote_vault_ref + "^{commit}") is not None
     )
     if seal_first and not adopting:  # (a deleted local branch is re-adopted, sealing comes after)
-        result.sealed, _analysis, _plan = vault.seal(git, repo, cfg, backend, now=now)
+        result.sealed, _analysis, _plan = vault.seal(
+            git, repo, cfg, backend, now=now, allow_replaced=accept_rewrite
+        )
     if fetch and fetched is None:
         fetched = fetch_vault(git, cfg)
     if fetched is False:
@@ -576,7 +578,22 @@ def sync(
         first_adoption = _gate_first_adoption(git, backend, repo, cfg, remote, confirm_adopt)
         _check_protected(git, repo, theirs.index)
         _verify_adopted(git, backend, theirs, {})
-        seq = _verify_remote_chain(git, backend, repo, cfg, remote)
+        try:  # a tip older than what this clone verified is never brought back by a re-sync
+            seq = vault.check_chain(
+                git,
+                backend,
+                repo,
+                cfg.vault_ref,
+                remote,
+                allow_replaced=accept_rewrite,
+                adopt=first_adoption,
+            )
+        except vault.VaultRollbackError as exc:
+            raise RemoteRewriteError(
+                f"{exc}: origin's vault branch is older than, or does not contain, the newest "
+                "vault state this clone verified (a rollback or a rewrite of the remote branch); "
+                "nothing was adopted (use --accept-remote-rewrite only after checking)"
+            ) from exc
         git.run("update-ref", "-m", "nbp-safe: sync", cfg.vault_ref, remote, "0" * len(remote))
         vault.mark_verified(
             repo, cfg.vault_ref, remote, seq, reset=accept_rewrite or first_adoption

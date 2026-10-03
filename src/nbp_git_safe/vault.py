@@ -597,11 +597,16 @@ def seal(
     forget: frozenset[str] = frozenset(),
     ask: Callable[[str], bool] | None = None,
     now: float | None = None,
+    allow_replaced: bool = False,
 ) -> tuple[str | None, Analysis, SealPlan | None]:
-    """Seal the protected files. Returns ``(commit or None, analysis, plan or None)``."""
+    """Seal the protected files. Returns ``(commit or None, analysis, plan or None)``. A branch
+    that is behind the verified record is refused unless ``allow_replaced`` (the caller adopts a
+    replaced history on purpose)."""
     read_verified(repo)  # a damaged record stops here, before anything is written
     protect.install_exclude_block(repo)
     state = load_vault(git, backend, cfg)
+    if state.tip is not None:  # never build on a branch that went back (a child would launder it)
+        ensure_not_behind(git, repo, cfg.vault_ref, state.tip, allow_replaced=allow_replaced)
     analysis = analyze(git, repo, cfg, backend, state, renames=renames, forget=forget)
     plan = plan_seal(repo, cfg, backend, analysis, now=now, ask=ask)
     if plan is None:
@@ -724,6 +729,20 @@ def verify_chain(git: Git, backend: Backend, tip: str, *, trusted: str | None = 
         if idx.prev != parent_indexes[0].digest():
             raise VaultRollbackError("the vault index does not link to its parent's index")
     return index_of(tip).seq
+
+
+def ensure_not_behind(
+    git: Git, repo: Repo, ref: str, tip: str, *, allow_replaced: bool = False
+) -> None:
+    """Refuse a ``tip`` that is behind, or does not descend from, the newest tip this clone
+    verified for ``ref`` (keyless: it only compares commit ids). Without a record there is nothing
+    to compare. ``allow_replaced``: the caller adopts a replaced history on purpose."""
+    known = read_verified(repo).get(ref)
+    if known is None or known[0] == tip or is_ancestor(git, known[0], tip) or allow_replaced:
+        return
+    if is_ancestor(git, tip, known[0]):
+        raise VaultRollbackError("the vault is behind a state this clone has verified")
+    raise VaultRollbackError("the vault history was replaced (it does not descend from it)")
 
 
 def adoption_message(git: Git, backend: Backend, ref: str, tip: str, seq: int) -> str:
