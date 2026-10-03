@@ -333,9 +333,17 @@ def private_socket_dir(*, create: bool) -> Path | None:
     if sys.platform == "win32":
         return None
     sdir = socket_dir()
+    root = runtime_root()
+    if sdir.parent == root and os.path.lexists(root):
+        problem = _dir_problem(root)  # <root>/s: the root is judged like everywhere else
+        if problem:
+            raise InsecureStateError(f"the key agent's state directory is not private: {problem}")
     if not os.path.lexists(sdir):
         if not create:
             return None
+        if sdir.parent == root and not os.path.lexists(root):
+            root.parent.mkdir(parents=True, exist_ok=True)
+            _make_private(root)
         _make_private(sdir)
     problem = _dir_problem(sdir)
     if problem:
