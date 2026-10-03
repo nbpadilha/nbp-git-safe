@@ -1171,12 +1171,23 @@ class AgentClient:
 
     # -- operations
     def hello(self) -> int:
-        return self._call(OP_HELLO)[0]
+        reply = self._call(OP_HELLO)
+        if not reply:
+            raise ProtocolError("malformed reply from the key agent")
+        return reply[0]
+
+    @staticmethod
+    def _json_object(body: bytes, encoding: str) -> dict[str, Any]:
+        try:
+            value = json.loads(body.decode(encoding))
+        except (ValueError, RecursionError):
+            raise ProtocolError("malformed reply from the key agent") from None
+        if not isinstance(value, dict):
+            raise ProtocolError("malformed reply from the key agent")
+        return value
 
     def status(self) -> dict[str, Any]:
-        value = json.loads(self._call(OP_STATUS).decode("ascii"))
-        assert isinstance(value, dict)
-        return value
+        return self._json_object(self._call(OP_STATUS), "ascii")
 
     def load_key(self, master: bytes) -> bytes:
         """Deliver the master key (once) over the authenticated channel; returns the key_id."""
@@ -1201,9 +1212,7 @@ class AgentClient:
         return self._call(OP_ENC_INDEX, pack_args(_pack_u32(bucket), payload))
 
     def dec_index(self, blob: bytes) -> dict[str, Any]:
-        value = json.loads(self._call(OP_DEC_INDEX, pack_args(blob)).decode("utf-8"))
-        assert isinstance(value, dict)
-        return value
+        return self._json_object(self._call(OP_DEC_INDEX, pack_args(blob)), "utf-8")
 
     def lock(self) -> None:
         with contextlib.suppress(AgentNotRunningError):

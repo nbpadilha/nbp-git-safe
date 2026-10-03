@@ -156,6 +156,8 @@ class Index:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], expected_key_id: bytes) -> Index:
+        if not isinstance(data, Mapping):
+            raise IndexValidationError("unsupported index structure")
         if set(data) != {"v", "key_id", "entries", "seq", "prev"} or data["v"] != INDEX_VERSION:
             raise IndexValidationError("unsupported index structure")
         seq, prev = data["seq"], data["prev"]
