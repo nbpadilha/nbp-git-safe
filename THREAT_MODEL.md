@@ -108,6 +108,12 @@ attacks on the `cryptography` library itself.
     is read, written or deleted. A planted file therefore cannot make the program delete anything
     (the only paths ever removed are `agent.json` and a socket at an exactly computed place), nor
     can it point the client at an arbitrary pipe.
+  * POSIX sockets live in a short, separately verified directory (`/tmp/nbp-<uid>`, 0700, owned by
+    the user, not a link; `docs/FORMAT.md` section 11) because `sun_path` is ~104 bytes. Squatting
+    that name in the shared `/tmp` (another user creating it first, or loosening it) makes the
+    check fail and the agent refuse to start: a denial of service, closed. It never leaks anything:
+    the secret and the state are not in that directory, and the client trusts a socket only after
+    the mutual handshake, the pid named in `agent.json` and the peer's uid.
   * The connection key is not stored: it is `HMAC(agent.secret, nonce)`; an impostor that merely
     writes an `agent.json` of its own cannot complete the handshake, so it receives neither
     plaintext (`seal`) nor the master key. `unlock` hands the key only to an agent it started

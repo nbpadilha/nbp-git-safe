@@ -2,6 +2,20 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
+## 0.1.1 - unreleased
+
+### Fixed
+
+- POSIX: the agent socket path exceeded `sun_path` (`AF_UNIX path too long`) under long state roots.
+  Sockets now live in a short, verified 0700 directory (`/tmp/nbp-<uid>`, or `<state root>/s` with
+  `NBP_SAFE_RUNTIME_DIR`), named `<12 hex>-<12 hex>.sock`, never more than 100 bytes; a root that is
+  too long gives a clear error. Squatting of that directory fails closed.
+- POSIX: the listener's backlog was 1, so a burst of clients (parallel hooks) could be refused
+  (`ECONNREFUSED`, seen on macOS); it is now 32.
+- POSIX: `pid_alive` no longer counts a zombie (exited, not yet reaped) as a running agent.
+- Tests: Windows SDDL alias (`LA`) normalised like the product does; short runtime roots on POSIX;
+  hooks inherit the test state root; macOS NFD/precomposition case.
+
 ## 0.1.0 - 2026-10-03
 
 First version (tagged locally, not published yet: see `docs/RELEASING.md`). Python rewrite of an idea

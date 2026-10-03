@@ -201,15 +201,30 @@ no allow entry for another account; POSIX: no group/other bits). If the check fa
 from it, written to it or deleted from it, and the agent counts as not running.
 
 Files in it: `agent.secret` (32 random bytes, created once with `O_EXCL`, mode 0600), `agent.json`,
-`unlock.lock`, and on POSIX the socket `s-<24 hex>.sock`.
+`unlock.lock`. On POSIX the socket does **not** live here (see "Socket directory" below).
 
 `agent.json`: `{v: 2, address, family, nonce (hex, 32 bytes), pid, started, expires_at,
 idle_timeout}`. It contains **no secret** and never the encryption key. The connection `authkey` is
 derived, not stored: `authkey = HMAC-SHA256(agent.secret, "nbp-git-safe/agent/authkey/v2" || nonce)`.
 `address` must be exactly what the program would have made: a pipe `\\.\pipe\nbp-git-safe-<24 hex>` on
-Windows, a socket that is a direct child of the state directory on POSIX; anything else makes the
-file "corrupted". The only paths the program ever deletes are `agent.json` and a socket that passed
+Windows, a socket that is a direct child of the socket directory on POSIX (`<12 hex>-<12 hex>.sock`,
+at most 100 bytes in all); anything else makes the file "corrupted". The only paths the program ever deletes are `agent.json` and a socket that passed
 that check; the content of a file never decides what else is removed.
+
+**Socket directory (POSIX).** `sun_path` holds 104 bytes on macOS and 108 on Linux, far less than
+the state directory path, so sockets sit in a separate short directory: `/tmp/nbp-<euid>` by
+default (fixed, deliberately independent of `$TMPDIR`, which is `/var/folders/...` on macOS and
+differs between processes, and of `$XDG_RUNTIME_DIR`, absent in cron or GUI-started hooks), or
+`<state root>/s` when the state root is overridden with `NBP_SAFE_RUNTIME_DIR`. Socket names are
+`<first 12 hex of the repository hash>-<12 random hex>.sock`; the full path must be at most 100
+bytes, otherwise the agent refuses to start with a clear message (use a shorter
+`NBP_SAFE_RUNTIME_DIR`). The directory is created 0700 and, like the state directory, re-verified on
+every use: a plain directory (not a link), owned by the current user, no group/other bits.
+It holds **sockets only**; `agent.secret`, `agent.json` and the lock stay in the private state
+directory. If somebody else created `/tmp/nbp-<uid>` first (squatting), or its mode is loose, the
+check fails and the agent does not start: a denial of service that fails closed. Nothing secret is
+ever placed there, and a socket in a directory another user controls would still need the
+`agent.secret`-derived handshake (and the peer-uid and pid checks) to be trusted.
 
 **Who starts the agent.** The process that runs `unlock` generates the address, the nonce and the
 `authkey` and hands them to the new agent over the agent's own **stdin pipe** (one JSON line); the
@@ -225,7 +240,7 @@ locked or unauthenticated one is replaced by a new agent.
 DACL granting the current user only, `PIPE_REJECT_REMOTE_CLIENTS`, and
 `FILE_FLAG_FIRST_PIPE_INSTANCE` so the name cannot be squatted; clients connect at
 `SECURITY_IDENTIFICATION` (the server cannot impersonate them). POSIX: an `AF_UNIX` socket in the
-0700 directory (mode 0600), the peer's uid is checked on accept and (Linux `SO_PEERCRED`, macOS
+0700 socket directory (mode 0600, listen backlog 32), the peer's uid is checked on accept and (Linux `SO_PEERCRED`, macOS
 `LOCAL_PEERCRED`) by the client. Before sending a single byte the client checks that the process
 serving the connection is the pid in `agent.json` (Windows `GetNamedPipeServerProcessId`, POSIX
 peer credentials) and belongs to the current user. `multiprocessing.connection` is used with
