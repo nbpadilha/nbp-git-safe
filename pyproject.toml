@@ -4,14 +4,39 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nbp-git-safe"
-version = "0.1.0"
+version = "0.1.1"
 description = "Encrypted, name-hiding vault for sensitive files inside a Git repository."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 authors = [{ name = "Nikolas Padilha" }]
+keywords = ["git", "encryption", "vault", "secrets", "aes-siv", "privacy", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security :: Cryptography",
+  "Topic :: Software Development :: Version Control :: Git",
+  "Topic :: System :: Archiving :: Backup",
+]
 dependencies = ["cryptography==50.0.1"]
+
+[project.urls]
+Homepage = "https://github.com/nbpadilha/nbp-git-safe"
+Repository = "https://github.com/nbpadilha/nbp-git-safe"
+Issues = "https://github.com/nbpadilha/nbp-git-safe/issues"
+Changelog = "https://github.com/nbpadilha/nbp-git-safe/blob/main/CHANGELOG.md"
+Security = "https://github.com/nbpadilha/nbp-git-safe/blob/main/SECURITY.md"
 
 [project.scripts]
 nbp-git-safe = "nbp_git_safe.cli:console"
@@ -26,6 +51,29 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nbp_git_safe"]
+
+[tool.hatch.build.targets.sdist]
+# An explicit list: the sdist carries the code, the tests (fake data only) and the documents a
+# packager needs, and nothing else (no internal plan, no upstream test suite, no CI or editor files,
+# no lockfile). scripts/check_package.py checks the built file.
+include = [
+  "/src",
+  "/tests",
+  "/scripts",
+  "/docs/FORMAT.md",
+  "/docs/GUARD.md",
+  "/docs/MULTI.md",
+  "/docs/RELEASING.md",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/README.md",
+  "/SECURITY.md",
+  "/THIRD_PARTY.md",
+  "/THREAT_MODEL.md",
+  "/pyproject.toml",
+]
 
 [tool.uv]
 # Absolute date: nothing published after it can be resolved (7-day cooldown

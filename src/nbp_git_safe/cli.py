@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Command-line interface (phases 2 and 3: agent and vault commands)."""
+"""Encrypted, name-hiding vault for sensitive files inside a Git repository (command line)."""
 
 from __future__ import annotations
 
