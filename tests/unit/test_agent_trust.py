@@ -29,6 +29,7 @@ from tests.helpers import ThreadAgent
 WINDOWS = sys.platform == "win32"
 KEY = bytes(range(64))
 NONCE_HEX = "ab" * 32
+SOCK = "a" * 12 + "-" + "b" * 12 + ".sock"
 
 
 def make_victim(root: Path) -> Path:
@@ -75,7 +76,10 @@ def hostile_addresses(victim: Path, cwd: Path) -> list[tuple[str, str]]:
         (relative, "AF_UNIX"),  # ../.. style, resolved against the current directory
         (str(victim / "sub" / ".." / "agent.sock"), "AF_UNIX"),
         (rf"\\.\pipe\{victim.name}", "AF_PIPE"),  # a pipe name that is not ours
-        (str(victim) + "/s-" + "0" * 24 + ".sock", "AF_UNIX"),  # right shape, wrong directory
+        (
+            str(victim) + "/" + "0" * 12 + "-" + "0" * 12 + ".sock",
+            "AF_UNIX",
+        ),  # right shape, wrong directory
     ]
 
 
@@ -149,9 +153,9 @@ def test_posix_socket_is_unlinked_only_at_its_exact_place(tmp_path: Path) -> Non
     import socket
 
     state = tmp_path / "s"
-    rdir = agent.private_dir(state, create=True)
-    assert rdir is not None
-    good = rdir / ("s-" + "1" * 24 + ".sock")
+    sdir = agent.private_socket_dir(create=True)
+    assert sdir is not None
+    good = sdir / ("1" * 12 + "-" + "2" * 12 + ".sock")
     srv = socket.socket(socket.AF_UNIX)
     srv.bind(str(good))
     srv.close()
@@ -170,11 +174,11 @@ def test_posix_socket_is_unlinked_only_at_its_exact_place(tmp_path: Path) -> Non
         (rf"\\.\pipe\other-{'a' * 24}", "AF_PIPE", None),
         (rf"\\.\pipe\nbp-git-safe-{'a' * 24}", "AF_UNIX", None),
         ("", "AF_PIPE", None),
-        ("relative/s-" + "a" * 24 + ".sock", "AF_UNIX", None),
-        ("/abs/other/s-" + "a" * 24 + ".sock", "AF_UNIX", None),
-        ("/abs/rdir/../rdir/s-" + "a" * 24 + ".sock", "AF_UNIX", None),
-        ("/abs/rdir/s-" + "a" * 24 + ".sock", "AF_UNIX", "posix"),
-        ("/abs/rdir/s-" + "a" * 24 + ".sock", "AF_INET", None),
+        ("relative/" + SOCK, "AF_UNIX", None),
+        ("/abs/other/" + SOCK, "AF_UNIX", None),
+        ("/abs/rdir/../rdir/" + SOCK, "AF_UNIX", None),
+        ("/abs/rdir/" + SOCK, "AF_UNIX", "posix"),
+        ("/abs/rdir/" + SOCK, "AF_INET", None),
     ],
 )
 def test_check_endpoint_accepts_only_what_this_program_makes(
@@ -190,14 +194,14 @@ def test_check_endpoint_accepts_only_what_this_program_makes(
 
 
 def test_a_handoff_with_a_foreign_endpoint_is_refused(tmp_path: Path) -> None:
-    rdir = agent.private_dir(tmp_path / "s", create=True)
-    assert rdir is not None
+    agent.private_dir(tmp_path / "s", create=True)
+    sdir = agent.private_socket_dir(create=True)  # None on Windows (pipes have no directory)
     good = agent.new_endpoint(tmp_path / "s")
-    assert agent.Endpoint.from_handoff(good.to_handoff(), rdir).address == good.address
+    assert agent.Endpoint.from_handoff(good.to_handoff(), sdir).address == good.address
     victim = make_victim(tmp_path)
     bad = dataclasses.replace(good, address=str(victim / "agent.sock"), family="AF_UNIX")
     with pytest.raises(agent.AgentError):
-        agent.Endpoint.from_handoff(bad.to_handoff(), rdir)
+        agent.Endpoint.from_handoff(bad.to_handoff(), sdir)
 
 
 # ------------------------------------------------------------------------------------ A1
@@ -307,6 +311,50 @@ def test_a_state_directory_others_can_write_is_refused_and_left_alone(tmp_path: 
     assert not any(p.suffix == ".sock" or p.name.startswith("s-") for p in rdir.iterdir())
 
 
+@pytest.mark.skipif(WINDOWS, reason="a socket directory exists on POSIX only")
+def test_a_squatted_or_loose_socket_directory_fails_closed(tmp_path: Path) -> None:
+    """Squatting of the shared temp location: whoever pre-creates the socket directory can at
+    most stop the agent from starting (denial of service); no socket is made in it and nothing
+    secret is ever put there."""
+    state = tmp_path / "s"
+    sdir = agent.private_socket_dir(create=True)
+    assert sdir is not None
+    assert agent.private_socket_dir(create=True) == sdir  # an existing good one is accepted
+    sdir.chmod(0o755)  # a loose mode (stands in for "created by somebody else")
+    with pytest.raises(agent.InsecureStateError, match="socket directory is not private"):
+        agent.private_socket_dir(create=True)
+    with pytest.raises(agent.InsecureStateError):
+        agent.new_endpoint(state)
+    with pytest.raises(agent.AgentError):
+        agent.spawn_agent(state, 60, None)
+    assert list(sdir.iterdir()) == []
+    sdir.chmod(0o700)
+    sdir.rmdir()
+    sdir.symlink_to(tmp_path)  # a link is no directory of ours
+    with pytest.raises(agent.InsecureStateError):
+        agent.private_socket_dir(create=True)
+    assert list(tmp_path.glob("*.sock")) == []
+
+
+@pytest.mark.skipif(WINDOWS, reason="AF_UNIX paths are POSIX only")
+def test_socket_paths_are_short_and_a_too_long_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ep = agent.new_endpoint(tmp_path / "s")
+    assert len(ep.address.encode()) <= agent.MAX_SOCKET_PATH
+    agent.set_runtime_root(tmp_path / ("d" * 120))
+    with pytest.raises(agent.AgentError, match="too long"):
+        agent.new_endpoint(tmp_path / "s")
+
+
+@pytest.mark.skipif(WINDOWS, reason="POSIX default location")
+def test_default_socket_dir_is_short_and_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent.set_runtime_root(agent._default_posix_root())
+    sdir = agent.socket_dir()
+    assert sdir == Path(f"/tmp/nbp-{os.geteuid()}")  # noqa: S108
+    assert len(str(sdir / ("a" * 12 + "-" + "b" * 12 + ".sock"))) < 60
+
+
 def test_a_loose_runtime_root_is_refused_too(tmp_path: Path) -> None:
     root = agent.runtime_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -398,7 +446,10 @@ def test_windows_pipe_is_for_the_current_user_only_and_rejects_remote_clients(
         aces = re.findall(r"\(([^()]*)\)", sddl)
         assert aces, sddl
         assert all(ace.split(";")[0] == "A" for ace in aces)  # no other kind of entry
-        assert {ace.split(";")[5] for ace in aces} == {winsec.current_user_sid()}, sddl
+        me = winsec.current_user_sid()
+        # the SDDL text may print the built-in Administrator as the alias ``LA`` (CI runner)
+        trustees = {winsec._resolve_trustee(ace.split(";")[5], me) for ace in aces}
+        assert trustees == {me.upper()}, sddl
     finally:
         ta.stop()
     assert winsec.PIPE_MODE & winsec.PIPE_REJECT_REMOTE_CLIENTS == 0x8

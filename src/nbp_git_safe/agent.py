@@ -20,7 +20,8 @@ client also checks, before anything is sent, that the process serving the pipe/s
 ``agent.json`` names and that it belongs to the current user.
 
 ``agent.json`` is never used to decide what to delete: the only paths removed are ``agent.json``
-itself and, on POSIX, a socket whose path is exactly ``<state dir>/s-<24 hex>.sock``.
+itself and, on POSIX, a socket that is a direct child of the verified socket directory
+(``<12 hex>-<12 hex>.sock``, see ``socket_dir``).
 """
 
 from __future__ import annotations
@@ -69,7 +70,9 @@ KEY_WAIT = 30.0  # a freshly spawned agent exits if no key arrives within this t
 START_TIMEOUT = 20.0
 HANDOFF_MAX = 4096  # bytes of the credentials line the CLI sends to a new agent
 _PIPE_RE = re.compile(r"\\\\\.\\pipe\\nbp-git-safe-[0-9a-f]{24}")
-_SOCK_RE = re.compile(r"s-[0-9a-f]{24}\.sock")
+_SOCK_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{12}\.sock")
+# ``sun_path`` is 104 bytes on macOS and 108 on Linux (including the NUL): stay well under both.
+MAX_SOCKET_PATH = 100
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
 
@@ -304,6 +307,42 @@ def private_dir(state_dir: Path | str, *, create: bool) -> Path | None:
     return rdir
 
 
+def _default_posix_root() -> Path:
+    return compute_runtime_root(
+        sys.platform, {}, uid=os.geteuid(), home=_account_home() or Path.home()
+    )
+
+
+def socket_dir() -> Path:
+    """Where the POSIX agent sockets live. A socket path is limited to ~104 bytes, so it cannot
+    sit under the (long) state root: the default is the short, fixed ``/tmp/nbp-<uid>`` (not
+    ``$TMPDIR``, which is ``/var/folders/...`` on macOS and differs between processes; not
+    ``$XDG_RUNTIME_DIR``, absent in cron/GUI-started hooks). When the state root is overridden
+    (``NBP_SAFE_RUNTIME_DIR``, tests) it is ``<root>/s``. Pure computation."""
+    root = runtime_root()
+    if root == _default_posix_root():
+        return Path(f"/tmp/nbp-{os.geteuid()}")  # noqa: S108 - verified 0700, owned, no links
+    return root / "s"
+
+
+def private_socket_dir(*, create: bool) -> Path | None:
+    """The verified socket directory (owner, mode 0700, not a link), created when asked. It holds
+    sockets only: the secret and the state stay in the private state directory. If another user
+    got there first (``/tmp`` squatting) this raises ``InsecureStateError``: the agent cannot
+    start (denial of service, closed), and nothing secret is ever placed there."""
+    if sys.platform == "win32":
+        return None
+    sdir = socket_dir()
+    if not os.path.lexists(sdir):
+        if not create:
+            return None
+        _make_private(sdir)
+    problem = _dir_problem(sdir)
+    if problem:
+        raise InsecureStateError(f"the key agent's socket directory is not private: {problem}")
+    return sdir
+
+
 def agent_json_path(state_dir: Path | str) -> Path:
     return runtime_path(state_dir) / AGENT_JSON
 
@@ -399,7 +438,7 @@ class Endpoint:
         )
 
     @classmethod
-    def from_handoff(cls, raw: bytes, rdir: Path) -> Endpoint:
+    def from_handoff(cls, raw: bytes, sdir: Path | None) -> Endpoint:
         try:
             data = json.loads(raw.decode("utf-8"))
             ep = cls(
@@ -416,20 +455,22 @@ class Endpoint:
             or len(ep.authkey) != AUTHKEY_LEN
         ):
             raise AgentError("invalid agent hand-off")
-        check_endpoint(ep.address, ep.family, rdir)
+        check_endpoint(ep.address, ep.family, sdir)
         return ep
 
 
-def check_endpoint(address: str, family: str, rdir: Path) -> None:
-    """The address must be exactly what this program would have made for ``rdir``: the platform's
-    own family, a pipe name of our shape, or a socket that is a direct child of ``rdir``."""
+def check_endpoint(address: str, family: str, sdir: Path | None) -> None:
+    """The address must be exactly what this program would have made: the platform's own family,
+    a pipe name of our shape, or a socket that is a direct child of the socket directory ``sdir``
+    and short enough for ``sun_path``."""
     if sys.platform == "win32":
         ok = family == "AF_PIPE" and _PIPE_RE.fullmatch(address) is not None
     else:
         ok = (
             family == "AF_UNIX"
             and os.path.isabs(address)
-            and os.path.dirname(address) == str(rdir)
+            and len(address.encode("utf-8", "surrogateescape")) <= MAX_SOCKET_PATH
+            and os.path.dirname(address) == str(sdir)
             and _SOCK_RE.fullmatch(os.path.basename(address)) is not None
         )
     if not ok:
@@ -446,7 +487,15 @@ def new_endpoint(state_dir: Path | str) -> Endpoint:
     if sys.platform == "win32":
         address, family = rf"\\.\pipe\nbp-git-safe-{secrets.token_hex(12)}", "AF_PIPE"
     else:
-        address, family = str(rdir / f"s-{secrets.token_hex(12)}.sock"), "AF_UNIX"
+        sdir = private_socket_dir(create=True)
+        assert sdir is not None
+        address = str(sdir / f"{repo_key(state_dir)[:12]}-{secrets.token_hex(6)}.sock")
+        family = "AF_UNIX"
+        if len(address.encode("utf-8", "surrogateescape")) > MAX_SOCKET_PATH:
+            raise AgentError(
+                "the agent socket path would be too long for AF_UNIX; "
+                "use a shorter NBP_SAFE_RUNTIME_DIR"
+            )
     return Endpoint(address, family, nonce, derive_authkey(secret, nonce))
 
 
@@ -524,7 +573,7 @@ def read_agent_info(state_dir: Path | str) -> AgentInfo | None:
         raise AgentError("agent.json is corrupted")
     info = AgentInfo.from_json(raw, secret)
     try:
-        check_endpoint(info.address, info.family, rdir)
+        check_endpoint(info.address, info.family, None if sys.platform == "win32" else socket_dir())
     except AgentError:
         raise AgentError("agent.json is corrupted") from None
     return info
@@ -561,12 +610,12 @@ def remove_agent_info(state_dir: Path | str) -> None:
         _retry_sharing((rdir / AGENT_JSON).unlink)
 
 
-def _remove_socket(address: str, rdir: Path) -> None:
-    """Unlink a POSIX socket that ``check_endpoint`` accepted for ``rdir`` (and only that)."""
+def _remove_socket(address: str) -> None:
+    """Unlink a POSIX socket that ``check_endpoint`` accepted (and only that)."""
     if sys.platform == "win32":
         return
     with contextlib.suppress(AgentError, OSError):
-        check_endpoint(address, "AF_UNIX", rdir)
+        check_endpoint(address, "AF_UNIX", socket_dir())
         if stat.S_ISSOCK(os.lstat(address).st_mode):
             os.unlink(address)
 
@@ -585,8 +634,7 @@ def cleanup_orphan(state_dir: Path | str) -> bool:
         return False
     if not pid_alive(info.pid) or time.time() >= info.expires_at:
         remove_agent_info(state_dir)
-        rdir = runtime_path(state_dir)
-        _remove_socket(info.address, rdir)
+        _remove_socket(info.address)
         return True
     return False
 
@@ -802,7 +850,9 @@ class AgentServer:
         endpoint = self._endpoint or new_endpoint(self.state_dir)
         rdir = private_dir(self.state_dir, create=True)
         assert rdir is not None
-        check_endpoint(endpoint.address, endpoint.family, rdir)
+        check_endpoint(
+            endpoint.address, endpoint.family, None if sys.platform == "win32" else socket_dir()
+        )
         self._authkey = endpoint.authkey
         self._listener = open_listener(endpoint.address, endpoint.family)
         now = time.time()
@@ -854,7 +904,7 @@ class AgentServer:
             with contextlib.suppress(OSError, AgentError):
                 self._remove_own_info()
             if self.info is not None:
-                _remove_socket(self.info.address, runtime_path(self.state_dir))
+                _remove_socket(self.info.address)
         finally:
             if self._exit is not os._exit:
                 self._wake()  # thread mode (tests): unblock accept()
@@ -1351,7 +1401,10 @@ def main(
         if endpoint is None:
             rdir = private_dir(state_dir, create=True)
             assert rdir is not None
-            endpoint = Endpoint.from_handoff(_read_handoff(), rdir)
+            endpoint = Endpoint.from_handoff(
+                _read_handoff(),
+                None if sys.platform == "win32" else private_socket_dir(create=True),
+            )
         server = AgentServer(state_dir, args.ttl, args.idle, exit_func=exit_func, endpoint=endpoint)
         server.start()
     except (AgentError, OSError):

@@ -184,8 +184,16 @@ def private_runtime_root(
     isolation fails right there, instead of leaving state behind in the developer's profile."""
     from nbp_git_safe import agent
 
-    root = tmp_path_factory.mktemp("runtime")
-    if sys.platform != "win32":
+    short: str | None = None
+    if sys.platform == "win32":
+        root = tmp_path_factory.mktemp("runtime")
+    else:
+        # AF_UNIX paths are limited to ~104 bytes: pytest's tmp_path (and macOS's /var/folders)
+        # is too long for the sockets under this root, so take a SHORT private directory.
+        import tempfile
+
+        short = tempfile.mkdtemp(prefix="nbp", dir="/tmp")
+        root = Path(short)
         root.chmod(0o700)
     if sys.platform == "win32":
         monkeypatch.setenv("LOCALAPPDATA", str(root))
@@ -194,6 +202,10 @@ def private_runtime_root(
     agent.set_runtime_root(root / agent.RUNTIME_NAME)
     yield root
     agent.clear_runtime_root()
+    if short is not None:
+        import shutil
+
+        shutil.rmtree(short, ignore_errors=True)
     if not REAL_RUNTIME_ROOT_EXISTED and REAL_RUNTIME_ROOT.exists():
         import shutil
 
