@@ -2,9 +2,13 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
-## 0.1.0 (in preparation, not released)
+## 0.1.0 - 2026-10-03
 
-First public version. Python rewrite of an idea started as a fork of transcrypt (MIT).
+First version (tagged locally, not published yet: see `docs/RELEASING.md`). Python rewrite of an idea
+started as a fork of transcrypt (MIT). Before this tag the code went through three rounds of
+adversarial review by a second model with working proofs of concept; every finding of the three
+rounds was fixed with a regression test that fails without the fix. They are listed below, round by
+round.
 
 ### Added
 
@@ -92,6 +96,43 @@ First public version. Python rewrite of an idea started as a fork of transcrypt 
   `sync --accept-remote-rewrite` now also adopts a branch `init` had re-created); `git gc
   --prune=now` instead of `git prune --expire now` for packed objects.
 - Tests: any test that creates the developer's real agent state directory now fails right there.
+
+### Security fixes from the third adversarial review
+
+- Medium: the tool read `.nbp-safe` differently from git (it removed every trailing CR, git removes
+  one). A collaborator who changed `reports/` to `reports/<CR><CR>` made the old version look
+  "equal", so it was pruned, while git saw a useless pattern: `list_protected`, `match_paths` and
+  `tracked_matches` lost `reports/`, new files were not sealed, `open` / `post-merge` failed
+  ("outside the protected set"), no warning was printed and a renamed copy of a not yet sealed file
+  passed `pre-commit` and `pre-push`. There is now ONE reader (`protect.lines_of`: BOM, one CR, NUL,
+  trailing spaces, tabs, blank and comment lines exactly as git) and ONE normalized text that every
+  comparison and every call to git uses (never the raw file); a seeded property test checks the
+  evaluation of the normalized text against `git check-ignore` on 500 random files.
+- Low: `sync` with no local vault branch adopted an origin tip older than the verified record, `seal`
+  built on it and `pre-push` let it out (a forced push would roll origin back): `sync`, `seal` and the
+  push guard now compare with the verified record (`--accept-remote-rewrite` is the explicit way).
+- Low: a pattern line that contained a marker of the exclude block (`x# <<< ...`) made every install
+  duplicate the rest of the block and left residue on uninstall: the markers are whole lines, and
+  such a pattern is written with the first `<`/`>` escaped (and linted).
+- Low: a `.nbp-safe` / `.nbp-safe.config` that was a symbolic link, junction, directory, special
+  file (a FIFO or `/dev/zero` would hang every hook) or larger than 1 MiB was followed and copied
+  into the pattern memory and `.git/info/exclude`: they are inspected with `lstat` and refused
+  unread.
+- Low: the exclude block omitted a positive that its own version negated and added again
+  (`keys/`, `!keys/`, `keys/`): only a negation AFTER the last occurrence drops it now.
+- Low: a remembered version that could not be read vanished from the block and the guard (fail
+  open): `PatternMemoryError` stops the hooks instead.
+- Low: the memory of versions had no bound (300 independent versions cost over a second per call,
+  plus one git run per version): covered versions are removed from the disk, at most 64 independent
+  versions are kept (the next one stops the hooks with a message about
+  `unprotect --accept-current`; nothing is dropped silently), and all versions are evaluated with one
+  `check-ignore` run (64 versions: a few hundred milliseconds in total, it used to be seconds).
+- Info: the exemption of `.nbp-safe` / `.nbp-safe.config` is by path only, the content check still
+  runs on blobs with those names; names are compared with case folding only where the repository
+  does (`core.ignorecase`).
+- Docs: `docs/RELEASING.md` (publish `main` and our own tags by name, never `--tags`: the repository
+  carries the upstream transcrypt tags), complete development-dependency licences and the note that
+  the `cryptography` wheels embed OpenSSL (Apache-2.0) in `THIRD_PARTY.md`.
 
 ### Fixed
 

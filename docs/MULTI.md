@@ -70,6 +70,10 @@ nbp-git-safe sync --accept-remote-rewrite       # fetches, verifies the new chai
 git reflog expire --expire=now --all && git gc --prune=now    # the old objects, if you want them gone
 ```
 
+A `sync` with no local vault branch (deleted, or never created) does not adopt an origin tip that is
+older than, or does not contain, the newest tip this clone verified: it stops with the same
+message, whatever `remote-seen.json` says; `--accept-remote-rewrite` is the explicit way.
+
 `init` is not part of it: it only re-creates a local branch that tracks origin (and records
 nothing); `open` still refuses a history that replaced the one it verified, and `sync
 --accept-remote-rewrite` is what adopts it, whether the branch is deleted or was re-created by

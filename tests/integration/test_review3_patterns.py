@@ -568,9 +568,10 @@ def test_the_memory_has_a_limit_and_never_drops_a_protection_to_keep_it(
 
 
 def test_sixty_four_versions_are_cheap(isolated_git: IsolatedGit, tmp_path: Path) -> None:
-    """Measured on the development machine: the memory work (read, prune, block) about 15 ms and
-    the whole ``list_protected`` / ``match_paths`` about 120 ms with 64 versions (it used to be one
-    git run per version, over two seconds). The limits below leave a generous margin."""
+    """Measured on the development machine (Windows, git 2.55) with 64 versions: the memory work
+    (read, prune, block, record) about 200 ms, ``list_protected`` about 200 ms and ``match_paths``
+    about 160 ms; it used to be one git run per version (over two seconds).
+    The limits below leave a generous margin."""
     root, repo, git = new_repo(isolated_git, tmp_path)
     fill(repo, protect.MAX_VERSIONS - 1)
     (root / ".nbp-safe").write_text("now/\n", newline="\n")

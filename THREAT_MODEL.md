@@ -64,8 +64,13 @@ attacks on the `cryptography` library itself.
   `unprotect --accept-current` (typed confirmation, durable) forgets (`docs/GUARD.md`). The
   protection lives in this clone's memory: a clone that never saw the protecting version (a fresh
   clone of an already-weakened `.nbp-safe`) has nothing to remember. `.nbp-safe` and
-  `.nbp-safe.config` are never protected paths, so a broad pattern pushed from the remote cannot
-  lock the repair of the file.
+  `.nbp-safe.config` are never protected paths (their content is still compared with the protected
+  content), so a broad pattern pushed from the remote cannot lock the repair of the file.
+  The file is read exactly as git reads it (one CR, BOM, trailing spaces; a CR-padded line is a
+  different pattern, so it cannot make an older version look "equal" and be pruned), a link,
+  special file or oversized `.nbp-safe` is refused unread, an unreadable memory stops the hooks
+  (fail closed), and the memory is capped at 64 independent versions (`unprotect --accept-current`
+  to start over): nothing is dropped silently.
 * **Hostile working tree.** `git` and `keyCommand` are resolved to absolute paths outside the
   current directory and outside the repository tree (`PATH` entries inside the repository, such as
   a `node_modules/.bin` or a `bin/` of the project, are skipped; when nothing else is found the

@@ -25,7 +25,7 @@ Version sensitive files in a Git repo, encrypted, with **latest version + full h
 - Hooks via git config hooks (`hook.<name>.command` + `.event`, git ≥ 2.54; verify the exact minimum version) so they run alongside existing hooks without touching hook files; fallback: transcrypt-style shim installed only if no hook exists (hash-compare, never overwrite foreign hooks). `doctor` checks.
 
 ## Config
-- `.nbp-safe` (versioned, repo root): `.gitignore` syntax (`#`, `!`, `/`, `**`), consumed literally by `git ls-files -z -c -i -X .nbp-safe` and by the exclude block. Patterns should be generic (lint warns on name-like patterns).
+- `.nbp-safe` (versioned, repo root): `.gitignore` syntax (`#`, `!`, `/`, `**`), read exactly as git reads it (one function, `protect.lines_of`) and handed to git (`ls-files -X`, `check-ignore`) only as the normalized text; also written into the exclude block. Patterns should be generic (lint warns on name-like patterns).
 - `.git/info/nbp-safe` (local, unversioned): extra patterns. Protected set = versioned OR local; a local negation never unprotects a versioned pattern. pre-commit uses the union of `.nbp-safe` from HEAD, index and working tree; removing a pattern and committing the file in the same commit is blocked (override only `NBP_SAFE_ALLOW_UNPROTECT=1`).
 - `.nbp-safe.config` (versioned, git-config format, read with `git config -f`): harmless options only (`vault.ref`, `pad.bucket`, `onMissing`, `commit.timeGranularity`).
 - `.git/config [nbp-safe]` (local): `keyCommand` (JSON argv), `autoUnlock` (default false), `autoPush` (default false), `ttl`. **Nothing that executes a command may come from a versioned file** (RCE risk).

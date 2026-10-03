@@ -45,6 +45,13 @@ The project is MIT. Contributions are accepted under MIT.
 * CI runs `scripts/check_licenses.py`: every Python file needs the SPDX MIT header and nothing under
   `src/` may carry a copyleft header.
 
+## Releases and the upstream tags
+
+The repository carries the tags of the transcrypt history it started from (`v0.9.4` ... `v2.3.2`,
+plus the local `upstream-base`). They are not releases of this project. Publish **only** `main` and
+our own tags, by name: `git push origin main v0.1.0`, never `--tags`, `--mirror` or `--all --tags`.
+The whole procedure is in [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Reporting vulnerabilities
 
 Not through issues or pull requests: see [SECURITY.md](SECURITY.md).

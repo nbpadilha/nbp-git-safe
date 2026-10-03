@@ -38,6 +38,30 @@ own matcher on probe paths; it can miss an unusual pattern, the protection does 
 Earlier negations are not "kept alive" either: a negation of an old version stays inside that
 version.
 
+**One reading of the file, git's own.** The tool reads `.nbp-safe` the way git does (one function,
+`protect.lines_of`): a leading UTF-8 BOM is skipped, a line that is empty or starts with `#` is
+dropped, exactly ONE trailing CR is removed (so `reports/<CR><CR>` is a different pattern from
+`reports/`, as for git), a line stops at a NUL, trailing spaces go unless escaped with a backslash,
+tabs are ordinary characters. Versions are compared on those lines, and git is always given the
+NORMALIZED text (never the raw file): what the tool calls "the same version" is what git sees as the
+same patterns. All versions are evaluated with ONE `check-ignore` run (each version is the
+`.gitignore` of its own directory of a scratch repository), so the cost does not grow with their
+number.
+
+**The memory is bounded and never silent.** A version that another covers is removed from the disk
+(and not written). At most 64 independent versions are kept; the 65th is neither written nor does
+anything get dropped: the hooks stop with a message that names `unprotect --accept-current`. A
+remembered version that cannot be read (a permission error, a damaged directory) stops the hooks
+too, instead of leaving that version, and what only it protects, out of the exclude block and the
+guard.
+
+**Hostile `.nbp-safe`.** `.nbp-safe`, `.git/info/nbp-safe` and `.nbp-safe.config` are inspected with
+`lstat` before they are read: a symbolic link, a junction or other reparse point, a directory, a
+special file (a FIFO, `/dev/zero`) or a file over 1 MiB is refused with a message, unread (a link
+would pull a file from outside the repository into the pattern memory and the exclude block).
+The markers of the exclude block are whole lines; a pattern that contains one is written with its
+first `<` / `>` escaped (the same pattern for git) and `lint` warns.
+
 Only the explicit, confirmed commands forget:
 
 * `nbp-git-safe unprotect <pattern> --confirm "unprotect <pattern>"` removes one pattern from every
@@ -51,10 +75,15 @@ Only the explicit, confirmed commands forget:
 
 A pattern or version that is written into the working-tree file again counts again.
 
-**Our own files.** `.nbp-safe` and `.nbp-safe.config` are never protected paths, whatever the
+**Our own files.** `.nbp-safe` and `.nbp-safe.config` are never protected PATHS, whatever the
 patterns say: a broad pattern from the remote (`*`) must not make the commit that repairs
 `.nbp-safe` impossible. (The vault index refuses them as entries as well; the exclude block ends
-with `!/.nbp-safe` and `!/.nbp-safe.config`.)
+with `!/.nbp-safe` and `!/.nbp-safe.config`.) The exemption is by path only: with the agent
+unlocked, the CONTENT check still runs on a staged or pushed blob with those names, so protected
+content copied into them does not pass. Their names are compared with case folding only where the
+repository does (`core.ignorecase`, set by `git init` on Windows and macOS); on a case-sensitive
+file system `.NBP-SAFE` is an ordinary file that a pattern may protect (the decision errs on the
+side of protecting).
 
 **Index membership.** With the agent unlocked, `pre-commit` and `pre-push` also block any staged or
 pushed path that is a path of the vault index (compared in NFC and case-folded), even when no
@@ -109,6 +138,12 @@ Per-blob authentication is *not* done here (it needs a decryption of every blob)
 **Seal before checking.** With the agent unlocked, `pre-push` first runs `seal`, so a protected
 file edited after the last commit is in the vault. If the vault tip moves while the vault branch is
 part of the same push, the pushed (older) tip goes out and the hook says to push again.
+
+**A vault branch that went back is not pushed.** With the agent unlocked, a tip that does not
+contain the newest tip this clone verified (`vault-seq.json`) is refused, however it came to be
+(`git branch -f`, a re-sync from a rolled-back origin): `seal` refuses to build on it too, so a new
+commit cannot launder the rollback into the record. The explicit way is
+`sync --accept-remote-rewrite`, which resets the record.
 
 **Out-of-date vault never blocks the code.** A locked agent, a stale vault or a vault that is behind
 the remote only produce warnings; what blocks is a protected file in the clear and a vault that is
