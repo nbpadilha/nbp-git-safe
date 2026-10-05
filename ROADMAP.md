@@ -1,26 +1,27 @@
 <!-- SPDX-License-Identifier: MIT -->
 # Roadmap
 
-What is left to do and what could come next. Status as of the `0.1.1` work (see
+What is left to do and what could come next. Status as of the `0.2.0` work (see
 `docs/MAINTAINER-NOTES.md` for the current repository state and how to resume).
 
 Legend: **[ ]** open, **[~]** partly done, **[x]** done.
 
-## 1. Before announcing 0.1.1
+## 1. Before announcing 0.2.0
 
-- [ ] **Independent re-review of the delta since the last completed review.** Three adversarial reviews
-      are done (see `docs/MAINTAINER-NOTES.md`). A fourth review (POSIX code, agent trust design,
-      packaging, docs fidelity) was started and **never finished**, and everything after commit `b4123b1`
-      (typed errors in index/agent-reply parsing, package metadata, fuzz tests, docs-as-tests) has had no
-      security review at all.
-- [ ] **Release `0.1.1` properly.** The local-only tag that existed during development pointed at a commit
-      whose package metadata still said `0.1.0`; it was deleted. Create the tag on the final commit, push
-      it **by name** (`git push origin v0.1.1`, never `--tags`: the history carries the upstream project's
-      tags), and write GitHub release notes from `CHANGELOG.md`.
+- [ ] **Independent re-review of the delta since the last completed review.** Five adversarial reviews
+      are done (see `docs/MAINTAINER-NOTES.md`); the fifth covered the `ci-tray` delta and its findings
+      are fixed, but the fixes themselves (the registered key id, the working directory of
+      `keyCommand`, the time limits and the push lane, the tray's unlock in a child process, the
+      OS-level file lock) have had no review of their own. The POSIX review that was started as the
+      fourth was never finished and is still open.
+- [ ] **Release `0.2.0` properly.** There was never a `0.1.1` tag (its changes ship in `0.2.0`); no
+      tag exists for `0.2.0` either. Create it on the final commit, push it **by name**
+      (`git push origin v0.2.0`, never `--tags`: the history carries the upstream project's tags),
+      and write GitHub release notes from `CHANGELOG.md`.
 - [ ] Decide on **PyPI**. The package metadata, sdist contents and a CI `package` job are prepared, nothing
       is published. Prefer GitHub Actions trusted publishing (OIDC) over a long-lived token.
 
-## 1b. Several repositories and the tray (branch `ci-tray`, awaiting security review)
+## 1b. Several repositories and the tray (branch `ci-tray`, fifth review fixed, awaiting merge)
 
 - [x] Per-user registry of repositories and the `registry` commands; `init` and `uninstall` keep it.
 - [x] `status|unlock|lock|seal|doctor --all`; `unlock --all` runs one `keyCommand` per distinct
@@ -28,9 +29,10 @@ Legend: **[ ]** open, **[~]** partly done, **[x]** done.
 - [x] Windows autostart (`autostart install|remove|status`, per-user `Run` value).
 - [x] Windows tray (`nbp-git-safe tray`): icon colours, menu, balloons, periodic seal and push,
       `tray.json`, rotating name-free log. Architecture and extension points: `docs/TRAY.md`.
-- [ ] **Independent security review** of this branch (registry parser, `unlock --all`, tray, autostart).
-- [ ] Hardening option: run the tray's unlock in a short-lived child process (`nbp-git-safe unlock`)
-      so the key never enters the long-lived tray process (see `THREAT_MODEL.md` section 8).
+- [x] Independent security review of this branch (registry parser, `unlock --all`, tray, autostart): the
+      fifth review; two medium and several low findings, all fixed (see `CHANGELOG.md`, 0.2.0).
+- [x] Hardening: the tray's unlock runs in a short-lived child process (`unlock-batch`) so the key
+      never enters the long-lived tray process (see `THREAT_MODEL.md` section 8).
 - [ ] Not verified on real hardware: high-DPI and high-contrast themes, the password-manager prompt
       raised from the tray, non-interactive sessions, Windows 10.
 - [ ] Elevated agent versus a non-elevated tray (same open item as the hooks, section 2).

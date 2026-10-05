@@ -37,18 +37,23 @@ Non-negotiable invariants (keep them in every change):
 ## 2. Repository state when paused
 
 - Public repository: `github.com/nbpadilha/nbp-git-safe`. Release `v0.1.0` is tagged and pushed.
-- `main` carried the `0.1.1` development line; all jobs of the CI matrix (Windows, macOS, Linux,
+- `main` carried the development line that became `0.2.0` (the `0.1.1` work was never tagged); all
+  jobs of the CI matrix (Windows, macOS, Linux,
   Python 3.11, 3.12, 3.13, plus the `quick` job) were green on it.
 - The branch `ci-final` (four commits on top: deterministic fuzz tests with two small typed-error fixes,
   PyPI-ready package metadata plus a `package` CI job, documentation-as-tests that run the README quickstart,
   and a rewritten purge test) was green in CI and was **merged into `main`** together with this file.
   Remote working branches `ci-final` and `ci-posix-fix` were deleted afterwards.
-- A `0.1.1` tag **does not exist yet** (see `ROADMAP.md` section 1).
-- Branch `ci-tray` (not merged; awaiting the security review in `ROADMAP.md` section 1b): the per-user
-  registry, the `--all` commands, the Windows tray and autostart (`docs/TRAY.md`). New modules:
-  `registry`, `statefile`, `trayconfig`, `traylog`, `fleet`, `fleetops`, `fleetcli`, `traycontroller`,
-  `autostart`, `tray_win`; small edits in `agent` (`private_root`, `retry_sharing`), `gitutil`
-  (`hide_child_windows`), `unlock` (`key_source`) and `cli`. The tests never touch the real per-user
+- Neither a `0.1.1` nor a `0.2.0` tag exists yet (see `ROADMAP.md` section 1); the version is `0.2.0`.
+- Branch `ci-tray` (not merged; the fifth review's findings are fixed, see `ROADMAP.md` section 1b):
+  the per-user registry, the `--all` commands, the Windows tray and autostart (`docs/TRAY.md`). New
+  modules: `registry`, `statefile`, `trayconfig`, `traylog`, `fleet`, `fleetops`, `fleetcli`,
+  `traycontroller`, `autostart`, `tray_win`, and from the review `keyid`, `keypin` (the registered public
+  key id), `unlockchild` (the tray's unlock in a short-lived child); changes in `agent`
+  (`private_root`, `retry_sharing`, `InsecureStateError` no longer hidden as "locked"), `gitutil`
+  (`hide_child_windows`, `kill_tree`, hard timeouts, `network_env`), `unlock` (`key_source`, `cwd`,
+  `expected_key_id`), `winsec` (`write_exposure`), `statefile` (OS lock) and `cli` (`key-id`,
+  `unlock-batch`). The tests never touch the real per-user
   directory: `NBP_SAFE_RUNTIME_DIR` through the existing fixtures.
 - Test suite: about 900 tests; the full run takes ~25-30 minutes locally on Windows, ~5 min on Linux CI,
   ~12 min on macOS, ~30 min on Windows CI. `crypto.py` must stay at 100% branch coverage (CI gate).
@@ -58,7 +63,8 @@ Non-negotiable invariants (keep them in every change):
 
 ## 3. Review history (so nothing is re-discovered)
 
-Four adversarial reviews were run by a separate reviewer with executable proofs of concept:
+Five adversarial reviews were run by a separate reviewer with executable proofs of concept (the fourth
+never finished):
 
 1. **Review 1** (before `9df751e`): critical C1 (guard open in linked worktrees: inherited `GIT_DIR` re-initialised
    the real repo and failed open), C2 (`rmtree` driven by a planted `agent.json`); high A1 (fake agent receives the
@@ -75,6 +81,14 @@ Four adversarial reviews were run by a separate reviewer with executable proofs 
    exclude block, symlinked `.nbp-safe`, dropped positive pattern, swallowed read errors, unbounded memory).
    Fixed.
 4. **Review 4 (POSIX and release readiness): started, did not finish.** It is the first thing to redo.
+5. **Review 5 (the `ci-tray` delta, by a separate reviewer):** M1 (an identical `keyCommand` argv was
+   assumed to give the same key: a relative path ran from the wrong folder and a repository without a
+   vault could be created under another repository's key), M2 (a `git` with no time limit froze the
+   tray's queue), and lows B1-B8 plus informational items (deep-check failure left the icon green,
+   `onMissing=ask` pending count, access-denied mutex, insecure state shown as "locked", discovery
+   climbing above a registered folder, configuration re-read, `autostart` ACL and dead value, documents
+   promising more than the code). All fixed with regression tests; a design rule came out of M1: **the
+   grouping of `unlock --all` is an optimisation, never a safeguard**: the registered key id is.
 
 Known backlog items from these reviews that were deliberately left open are listed in `ROADMAP.md`.
 
@@ -87,7 +101,7 @@ Known backlog items from these reviews that were deliberately left open are list
 3. Re-run the independent security review over `git diff 4430743..HEAD`, with the POSIX focus list from
    `ROADMAP.md` section 2. Fix findings with regression tests that fail before the fix (prove it by running
    them against the previous commit in a throwaway worktree).
-4. Do the `0.1.1` release (`ROADMAP.md` section 1).
+4. Do the `0.2.0` release (`ROADMAP.md` section 1).
 5. Then pick from the backlog; start with the POSIX items and the real-second-user tests.
 
 ## 5. Practical gotchas learned the hard way

@@ -84,6 +84,11 @@ can bring the purged data back.
 
 `nbp-git-safe push` seals (when unlocked) and runs `git push origin refs/heads/nbp-safe:refs/heads/nbp-safe`.
 A rejection means origin has commits you do not have: run `sync`, then push again.
+A refusal by origin's own rules (a server-side hook, a protected branch) is reported as such, and
+`sync` will not help. Neither `push` nor `sync` waits for ever: each has a limit of ten minutes, after
+which the whole process tree (git, `ssh`, a credential helper) is stopped and the command says so; the
+vault is pushed with `--no-follow-tags`, never `--tags`. (The tray's background push has a limit of
+two minutes and never prompts: `docs/TRAY.md`.)
 `nbp-git-safe init --auto-push` sets `remote.origin.push` (the current branch, if you had no
 refspecs, plus the vault) so a plain `git push` carries the vault; `uninstall` removes exactly the
 refspecs it added.
@@ -101,9 +106,11 @@ refspecs it added.
    rotation protects what is written from now on and lets you retire the old branch.
 
 Next steps, printed by the command: replace the key in the password manager item used by
-`keyCommand`, `git config nbp-safe.vaultRef refs/heads/nbp-safe-<year>`, `lock && unlock`,
-`git push origin nbp-safe-<year>` (the pre-push guard validates the new branch with the new key, so
-switch first).
+`keyCommand`, `git config nbp-safe.vaultRef refs/heads/nbp-safe-<year>`,
+`nbp-git-safe key-id --accept <id>` (each repository records the public id of its key, and
+the old id refuses the new key until you accept it on purpose; the command prints the id and asks
+for a typed confirmation), `lock && unlock`, `git push origin nbp-safe-<year>` (the pre-push guard
+validates the new branch with the new key, so switch first).
 
 ## purge
 

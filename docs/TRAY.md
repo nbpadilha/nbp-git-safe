@@ -70,7 +70,26 @@ handed to the agent of every repository of the group, one after the other, over 
 authenticated channel. A group whose command fails (a refused prompt, a timeout) fails as a group:
 the command is not asked again for the next repository of it. Groups run one at a time, so there is
 at most one prompt on screen. A repository that is already unlocked does not need the key and
-causes no run. The key reaches an agent only if this process has just started that agent and
+causes no run.
+
+Two rules keep the grouping honest. **The command always runs from the root of the repository it
+is for** (`nbp-git-safe unlock`, a hook, `--all` and the tray all give it the same working
+directory), and a `keyCommand` that holds a **relative path** (`["python", "tools/key.py"]`,
+`["sh", ".git/key.sh"]`, or `python key.py` with the file in the repository) is not the same
+command in two repositories even when the argv is identical: such a repository is a group of its
+own, with its own prompt (a plain `pass show team/key` is reported the same way, which costs one
+prompt more; an absolute path or a URI such as `op://vault/item` does not). And **each repository
+records the public id of its key** (8 bytes derived from the key, already printed by `status` and
+written in every vault blob; never the key) in its local `.git/config` as `nbp-safe.keyId`: by the
+first `unlock` run inside the repository, by the first `seal` (which also proves the key opens the
+vault), or by `nbp-git-safe key-id --accept <id>`. Every delivery of a key and every seal is
+checked against it, so a key meant for another repository is refused before any agent starts
+(`key-id-mismatch`, with the two ids and the command to accept a deliberate change), whatever the
+commands are. A repository that has no registered id and no vault yet is not handed a group's key
+at all (`no-key-id`: run `nbp-git-safe unlock` inside it once). After `rotate` the new key has a
+new id: the printed next steps include `nbp-git-safe key-id --accept <id>`, which needs a typed
+confirmation (`--confirm "accept key id <id>"` without a terminal). `doctor` reports a missing id,
+a relative path in `keyCommand`, and an agent that holds another key than the registered one. The key reaches an agent only if this process has just started that agent and
 authenticated it (as in `nbp-git-safe unlock`); it is never put in an argument, an environment
 variable, a file or a message, and the buffer the group owns is zeroed afterwards (Python cannot
 reach the immutable copies it made on the way; the single-repository `unlock` has the same limit).
@@ -78,11 +97,19 @@ reach the immutable copies it made on the way; the single-repository `unlock` ha
 **`seal --all`** seals the repositories whose agent is unlocked and **never unlocks** anything: a
 locked repository is skipped with one status line. `--push` then runs
 `git push origin refs/heads/nbp-safe` (no force, never tags) in the repositories that have
-`nbp-safe.autoPush` set **and** an `origin`. The push never prompts and gives up on a stalled
-transfer (`GIT_TERMINAL_PROMPT=0`, low-speed limits); a remote that cannot be reached is a warning
-(the line says to run `nbp-git-safe push` in that repository), not a failure; a rejection (origin
-has commits you do not) or a refusal by the push guard is a failure. The text git printed is not
-repeated (it may contain a URL).
+`nbp-safe.autoPush` set **and** an `origin`. The push has a **hard time limit of 120 seconds**; when
+it runs out the whole process tree (git, `ssh`, a credential helper) is killed and the line says so
+(`push-timeout`, a warning). It never waits for a person: no terminal prompt
+(`GIT_TERMINAL_PROMPT=0`), no Git Credential Manager window (`GCM_INTERACTIVE=never`), slow HTTP
+transfers abandoned (low-speed limits), and, **only when you set no ssh command of your own**
+(`GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand` are never overridden), an `ssh` that is
+non-interactive and gives up on a dead connection (`BatchMode=yes`, `ConnectTimeout`,
+`ServerAliveInterval`). A remote that cannot be reached is a warning (the line says to run
+`nbp-git-safe push` in that repository), not a failure; a rejection (origin has commits you do not),
+a refusal by origin's own rules (a hook, a protected branch: `push-refused`, `sync` will not help) or
+a refusal by the push guard is a failure. The text git printed is not repeated (it may contain a
+URL). The pushes a person starts (`nbp-git-safe push`, `sync`) have a limit of ten minutes and keep
+their terminal prompts. The vault is pushed with `--no-follow-tags`, never `--tags`.
 
 ## 3. The tray (Windows)
 
@@ -95,7 +122,10 @@ nbp-git-safe autostart status
 nbp-git-safe autostart remove
 ```
 
-One tray per user session (a named mutex; a second start leaves quietly). No dependency was added:
+One tray per user session (a named mutex; a second start leaves quietly). If the name is held by
+an account or a privilege level this process cannot open (access denied), that is **not** "already
+running": the tray says so in a message box, writes `mutex-denied` to its log and exits with code 4
+(a normal second start exits with 0). No dependency was added:
 the window, the icon, the menu and the balloons are `ctypes` calls (`user32`, `shell32`, `gdi32`,
 `kernel32`), and the icons are drawn in memory.
 
@@ -106,7 +136,7 @@ the window, the icon, the menu and the balloons are `ctypes` calls (`user32`, `s
 | gray | no repository is registered |
 | green | every repository has an unlocked agent with at least an hour left, and nothing needs attention |
 | yellow | some repository is locked, its folder is missing, or an unlocked agent has less than an hour left |
-| red | some repository needs attention: it cannot be opened or its agent cannot be reached, `doctor` reports a problem, the vault diverged from origin (or went back, or was replaced), or protected files stayed unsealed for longer than `warnPendingMinutes` (30 by default) |
+| red | some repository needs attention: it cannot be opened or its agent cannot be reached (including a state directory that is not private: `insecure-state`, shown as an error, never as "locked"), `doctor` reports a problem, **the slower health check itself failed** (not a clean bill of health), the vault diverged from origin (or went back, or was replaced), or protected files stayed unsealed for longer than `warnPendingMinutes` (30 by default) |
 
 Red wins over yellow. The tooltip says the same in words (`2 unlocked, 1 locked; 1 need attention;
 next expiry 25m`), so colour is never the only signal.
@@ -126,20 +156,35 @@ file), **Start with Windows** (checked according to the Run key) and **Quit**. N
 |---|---|---|
 | refresh | every 30 s | reads the registry and the agent of every repository **in this process** (a handshake and a status call, no child process) |
 | health check | every 10 min | `doctor` problems, the vault against origin, and (unlocked only) how many protected files wait to be sealed; also re-reads each repository's configuration |
-| periodic seal | `sealIntervalMinutes` (15) | the equivalent of `seal --all` for the unlocked repositories (and `--push` with `sealPush`), which closes the gap "a script wrote a file and it only enters the vault at the next commit" |
+| periodic seal | `sealIntervalMinutes` (15) | the equivalent of `seal --all` for the unlocked repositories, which closes the gap "a script wrote a file and it only enters the vault at the next commit" |
+| push | after a seal, with `sealPush` | `git push origin refs/heads/nbp-safe` where `autoPush` is set and an `origin` exists; on its **own lane**, with the hard time limit of section 2 |
 | configuration | every minute | re-reads `tray.json` |
 | unlock | on a menu click, or once at start with `unlockAtLogin` | `unlock` of one repository or of all (section 2); on its own serial lane, because the password manager may take up to two minutes |
 
 Nothing blocks the message loop: every slow thing runs on a worker thread and reports through a
 short error code on the repository and a line in the menu (`last: key-command`); an exception in a
-job is logged and swallowed. The periodic seal never unlocks. The tray unlocks only when you click
-Unlock, or at start when you turned `unlockAtLogin` on (the "one approval a day").
+job is logged and swallowed. There are three lanes: unlocking, pushing and everything else, so a
+push that hangs (an `origin` that never answers, a credential helper with a window of its own)
+delays only the next push: the icon, the state and the warnings keep updating, and a push that ran
+out of time is a short code on the repository (`push-timeout`) and a discreet balloon. A push is
+never queued twice for one repository. The periodic seal never unlocks. The tray unlocks only when
+you click Unlock, or at start when you turned `unlockAtLogin` on (the "one approval a day"). The
+configuration of the repository is read again right before every unlock and every push, so a
+`keyCommand` you changed a moment ago applies at once (the periodic refresh reads it every ten
+minutes). With `onMissing=ask` the tray (like `--all`) keeps a file that was deleted locally, as
+`keep` does, because nobody is there to answer; such a file is not counted as pending.
 
 ### Balloons
 
 When an agent has `warnExpiryMinutes` (30) left (once per unlock), when protected files have been
 unsealed for `warnPendingMinutes` (30; once per episode), and when an operation fails (once per
-error code until it succeeds again). `0` turns a warning off.
+error code until it succeeds again; a push that did not complete is a warning, not an alarm). `0`
+turns a warning off.
+
+**Windows keeps a history of notifications** (the notification centre), and a balloon that names a
+folder leaves that name there, outside this tool's control. With `notifications=minimal` a balloon
+says `repository 3` (its position in `registry list`) instead of the folder's name; the menu, which
+is not kept, still shows names.
 
 ### Configuration
 
@@ -152,9 +197,10 @@ error code until it succeeds again). `0` turns a warning off.
 | `unlockAtLogin` | false | true or false |
 | `warnExpiryMinutes` | 30 | 0 to 1440 (0: off) |
 | `warnPendingMinutes` | 30 | 0 to 1440 (0: off; the red rule still uses 30) |
+| `notifications` | full | `full` or `minimal` (no folder name in a balloon) |
 
 Validation is strict: an unknown name, a string where a number belongs, a boolean written as `1`,
-or a number out of range makes the whole file invalid; the tray then runs on the defaults, says so
+a word that is not in the list, or a number out of range makes the whole file invalid; the tray then runs on the defaults, says so
 at the top of its menu and never rewrites the file for you.
 
 ### Log
@@ -166,7 +212,13 @@ name, no file name, no exception text, no key. Writing the log never raises.
 
 ### Autostart
 
-`autostart install` writes the value `nbp-git-safe-tray` under
+`autostart install` first checks who can change what it is about to register: the interpreter
+(`pythonw.exe`) **and the folder it sits in** (a replaced program or library there would run at
+every login with your rights). If another account (Users, Everyone, Authenticated Users, another
+SID) has write access to either, it **refuses** and says which; `--allow-writable` installs it
+anyway, knowingly. `autostart status` runs the same check on the stored program and also says when
+that program **no longer exists** (a moved or deleted environment leaves a dead value: run
+`autostart remove`, then `install` again). It writes the value `nbp-git-safe-tray` under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` with the command
 `"<pythonw.exe>" -I -m nbp_git_safe tray`: absolute path of the `pythonw.exe` that sits next to the
 interpreter running the install (the one of the `uv tool` or virtual environment), quoted for paths
@@ -188,17 +240,32 @@ again). A path containing `%` or `"` is refused.
 * **Not verified by the test suite:** behaviour on high-DPI and high-contrast themes (the icon is
   drawn at `SM_CXSMICON`, with the process marked DPI-aware), the real password-manager prompt from
   the tray, and sessions other than a normal interactive one.
-* Python cannot wipe memory reliably (see `THREAT_MODEL.md`); the tray adds no new copy of a key
-  beyond the one `unlock` already makes while it hands the key to the agent.
+* **The tray does not handle a key itself.** Unlocking from the menu or at login runs
+  `python -I -m nbp_git_safe unlock-batch` in a short-lived **child process**: the tray hands it the
+  folders (paths only, on stdin) and reads back one JSON line per repository (a code and a message,
+  parsed strictly and reduced to known shapes), and the child opens each repository, runs each
+  distinct key command once, gives the key to the agents it starts and exits. The key therefore
+  never enters the tray's own address space, which lives for weeks. Python still cannot wipe the
+  copies the interpreter makes (see `THREAT_MODEL.md`): they stay in the child's memory (and in a
+  crash dump or the page file, if one is written) until the system reuses the pages, a few seconds
+  after the unlock instead of after the agent has expired. A child that dies, stalls (it is killed
+  after the sum of the key commands' limits plus a minute) or says something unintelligible leaves
+  the repositories it did not report as `unlock-child` failures. `nbp-git-safe unlock --all` from a
+  terminal is a process of its own that exits as well.
+* **Windows messages.** The tray's hidden window accepts a notification-area message only when it
+  carries the icon's own id, and never opens a second menu while one is open. A process of the same
+  user can still post such a message (there is no sender to check) and make the menu appear, and
+  Windows' message filtering separates **integrity levels, not users**; it cannot choose an item,
+  because the numeric ids come from the tray's own table (see `THREAT_MODEL.md`).
 
 ## 4. What is stored, and where
 
 | File | Content |
 |---|---|
 | `repos.json` (+ `.bak`) | paths and dates |
-| `tray.json` | the five options |
+| `tray.json` | the six options |
 | `tray.log` (+ `.1`) | codes and counts |
-| `repos.json.lock`, `tray.json.lock` | empty, exist while a writer works |
+| `repos.json.lock`, `tray.json.lock` | empty; the lock is an operating-system lock on the file (released by the system if its holder dies), so the files stay |
 
 No key, no plaintext, no protected file name. The tests scan all of them (and every `.git`) for the
 test keys and canary names after real runs.
@@ -209,7 +276,8 @@ test keys and canary names after real runs.
 
 * `RepoState`: `key` (the agent's repository key, 24 hex), `index` (registry position, 1-based),
   `name`, `path`, `status` (`unlocked`, `locked`, `missing`, `error`), `expires_at`, `auto_unlock`,
-  `problems`, `divergent`, `pending`, `pending_since`, `busy`, `error`.
+  `problems`, `divergent`, `pending`, `pending_since`, `busy`, `error`, `check_error` (the slower
+  health check could not run: red).
 * `aggregate_color(states, now)`, `tooltip(states, now)`: the rules of section 3.
 * `build_menu(states, now, MenuSettings)` returns a tree of `MenuItem(id, label, enabled, checked,
   separator, children)`; `parse_command(id)` is the strict parser of the ids (`repo:<key>:<action>`,
@@ -230,16 +298,22 @@ test keys and canary names after real runs.
 Constructor hooks: `wake` (called from worker threads when something changed: it must be
 thread-safe and should only post a message to the UI thread), `open_folder`, `open_config`,
 `autostart_get`/`autostart_set` (leave `None` when the platform has no such thing and the menu item
-disappears), `autostart_label`, `log`, and the clock and the two workers for tests.
+disappears), `autostart_label`, `unlock_runner` (how an unlock is run: the default is
+`fleetops.unlock_all` in this process, the Windows tray passes `unlockchild.run_in_child`, which does
+it in a short-lived child so the key never enters the tray), `log`, and the clock and the three
+workers (unlock, push, everything else) for tests.
 
 ## 6. Layers
 
 ```
 registry.py     the file of repositories                       neutral
-statefile.py    atomic write, lock, small reads                neutral
+statefile.py    atomic write, OS lock, small reads             neutral
+keyid.py        the registered public id of a repository's key neutral
+keypin.py       recording and checking it around an unlock     neutral
 trayconfig.py   tray.json                                      neutral
 traylog.py      the name-free log                              neutral
 fleetops.py     operations over repositories (unlock_all ...)  neutral
+unlockchild.py  the tray's unlock in a short-lived process     neutral
 fleetcli.py     --all, registry, autostart, tray options       neutral
 fleet.py        pure model: colours, menu, schedule, notices   neutral
 traycontroller  jobs, threads, state; drives a front end       neutral
