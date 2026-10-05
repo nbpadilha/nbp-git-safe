@@ -227,7 +227,7 @@ def group_by_key_command(handles: Sequence[RepoHandle]) -> list[list[RepoHandle]
 def unlock_all(
     handles: Sequence[RepoHandle],
     *,
-    key_runner: Callable[[Sequence[str], float], bytes] = unlock.run_key_command,
+    key_runner: Callable[..., bytes] = unlock.run_key_command,
     spawn: Callable[[Path, float, float | None], agent.AgentInfo] = agent.spawn_agent,
     on_outcome: Callable[[Outcome], None] | None = None,
 ) -> list[Outcome]:
@@ -255,7 +255,10 @@ def unlock_all(
                 )
             continue
         timeout = max(h.cfg.key_command_timeout for h in group)
-        source = GroupKey(lambda argv=argv, timeout=timeout: key_runner(argv, timeout))
+        trees = [h.repo.toplevel for h in group]
+        source = GroupKey(
+            lambda argv=argv, timeout=timeout, trees=trees: key_runner(argv, timeout, avoid=trees)
+        )
         try:
             for handle in group:
                 report(_unlock_one(handle, argv, source, spawn))

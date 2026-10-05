@@ -16,6 +16,7 @@ parameter. It is the layer a macOS or Linux front end reuses unchanged (see ``do
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -326,38 +327,46 @@ class Schedule:
         self._intervals = dict(intervals)
         self._next = {n: (now if n in immediately else now + s) for n, s in intervals.items()}
         self._running: set[str] = set()
+        self._lock = threading.Lock()  # the UI thread asks, worker threads report
 
     def set_interval(self, name: str, seconds: float, now: float) -> None:
         if seconds <= 0:
             raise ValueError("interval must be positive")
-        self._intervals[name] = seconds
-        if name not in self._running:
-            self._next[name] = min(self._next[name], now + seconds)
+        with self._lock:
+            self._intervals[name] = seconds
+            if name not in self._running:
+                self._next[name] = min(self._next[name], now + seconds)
 
     def due(self, now: float) -> list[str]:
         out = []
-        for name in self._intervals:
-            # a clock that went backwards must not postpone a job for longer than its interval
-            if name not in self._running and self._next[name] > now + self._intervals[name]:
-                self._next[name] = now + self._intervals[name]
-            if name not in self._running and now >= self._next[name]:
-                self._running.add(name)
-                out.append(name)
+        with self._lock:
+            for name in self._intervals:
+                if name in self._running:
+                    continue
+                # a clock that went backwards must not postpone a job for longer than its interval
+                if self._next[name] > now + self._intervals[name]:
+                    self._next[name] = now + self._intervals[name]
+                if now >= self._next[name]:
+                    self._running.add(name)
+                    out.append(name)
         return out
 
     def trigger(self, name: str) -> bool:
         """Start ``name`` out of turn (a menu command). False when it is already running."""
-        if name in self._running:
-            return False
-        self._running.add(name)
-        return True
+        with self._lock:
+            if name in self._running:
+                return False
+            self._running.add(name)
+            return True
 
     def done(self, name: str, now: float) -> None:
-        self._running.discard(name)
-        self._next[name] = now + self._intervals[name]
+        with self._lock:
+            self._running.discard(name)
+            self._next[name] = now + self._intervals[name]
 
     def running(self, name: str) -> bool:
-        return name in self._running
+        with self._lock:
+            return name in self._running
 
 
 # ------------------------------------------------------------------------------- notices

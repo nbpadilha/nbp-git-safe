@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 from pathlib import Path
 
 from nbp_git_safe import fleet, registry, trayconfig
@@ -120,7 +121,8 @@ def test_registry_paths_are_never_accepted_unless_canonical_and_absolute() -> No
         text = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 6)))
         if registry.path_problem(text) is None:
             assert os.path.isabs(text) and os.path.normpath(text) == text
-            assert ".." not in text.replace("\\", "/").split("/")
+            parts = re.split(r"[\\/]", text) if os.name == "nt" else text.split("/")
+            assert ".." not in parts and "." not in parts
 
 
 def test_tray_config_parser_survives_mutations_and_random_values() -> None:

@@ -4,6 +4,7 @@ keyCommand and the handle errors."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -54,8 +55,9 @@ def test_handles_report_short_codes(tmp_path: Path) -> None:
 def test_short_name() -> None:
     assert fleetops.short_name("/a/b/proj") == "proj"
     assert fleetops.short_name("/a/b/proj/") == "proj"
-    assert fleetops.short_name("C:\\work\\proj\\") == "proj"
     assert fleetops.short_name("/") == "/"
+    if os.name == "nt":  # a backslash separates folders only on Windows
+        assert fleetops.short_name("C:\\work\\proj\\") == "proj"
 
 
 def handle(n: int, command: tuple[str, ...] | None, timeout: float = 120.0) -> RepoHandle:
@@ -123,8 +125,11 @@ def test_unlock_all_uses_the_injected_runner_once_per_group(tmp_path: Path) -> N
     """The runner is called once per distinct argv even when ``unlock`` itself fails afterwards."""
     seen: list[tuple[str, ...]] = []
 
-    def runner(argv: tuple[str, ...], timeout: float) -> bytes:
+    trees: list[list[object]] = []
+
+    def runner(argv: tuple[str, ...], timeout: float, *, avoid: list[object]) -> bytes:
         seen.append(tuple(argv))
+        trees.append(list(avoid))  # the repositories of the group must not provide the program
         return bytes(64)
 
     handles = [
@@ -132,7 +137,7 @@ def test_unlock_all_uses_the_injected_runner_once_per_group(tmp_path: Path) -> N
             i,
             tmp_path / f"r{i}",
             f"r{i}",
-            type("R", (), {"state_dir": tmp_path / f"state{i}"})(),  # type: ignore[arg-type]
+            type("R", (), {"state_dir": tmp_path / f"state{i}", "toplevel": tmp_path / f"r{i}"})(),  # type: ignore[arg-type]
             None,  # type: ignore[arg-type]
             Config(key_command=("k", "1" if i < 3 else "2")),
             f"{i:024x}",
@@ -146,4 +151,5 @@ def test_unlock_all_uses_the_injected_runner_once_per_group(tmp_path: Path) -> N
     outcomes = fleetops.unlock_all(handles, key_runner=runner, spawn=failing_spawn)  # type: ignore[arg-type]
     assert [o.kind for o in outcomes] == ["failed"] * 4
     assert seen == [("k", "1"), ("k", "2")]
+    assert trees == [[tmp_path / "r1", tmp_path / "r2"], [tmp_path / "r3", tmp_path / "r4"]]
     assert all(o.code == "agent" for o in outcomes)

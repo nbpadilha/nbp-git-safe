@@ -52,15 +52,19 @@ def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
         proc.kill()
 
 
-def run_key_command(argv: Sequence[str], timeout: float) -> bytes:
-    """Run ``argv`` (no shell) and return the validated 64-byte master key."""
+def run_key_command(
+    argv: Sequence[str], timeout: float, *, avoid: Sequence[str | os.PathLike[str]] = ()
+) -> bytes:
+    """Run ``argv`` (no shell) and return the validated 64-byte master key. ``avoid`` lists
+    repository trees that must not provide the program (``unlock --all`` is not run from inside
+    the repository it unlocks, so the caller names them)."""
     if not argv:
         raise KeyCommandError("no keyCommand configured (git config nbp-safe.keyCommand)")
     kwargs: dict[str, Any] = gitutil.window_flags()
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
     try:
-        command = [gitutil.resolve_executable(argv[0]), *argv[1:]]  # never from the cwd
+        command = [gitutil.resolve_executable(argv[0], avoid=avoid), *argv[1:]]  # not from the cwd
         proc = subprocess.Popen(  # noqa: S603 - argv list from the local .git/config, no shell
             command,
             env=gitutil.child_env(os.environ),
