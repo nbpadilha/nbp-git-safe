@@ -19,7 +19,6 @@ import hashlib
 import os
 import subprocess
 import sys
-from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
@@ -53,11 +52,39 @@ LRESULT = ctypes.c_ssize_t
 HANDLE = ctypes.c_void_p
 
 
+class wt:
+    """The few Win32 type names used here, spelled with ``ctypes`` primitives. ``ctypes.wintypes``
+    is not imported so that this module loads on every platform."""
+
+    DWORD = ctypes.c_uint32
+    UINT = ctypes.c_uint32
+    WORD = ctypes.c_uint16
+    ATOM = ctypes.c_uint16
+    BOOL = ctypes.c_int
+    WCHAR = ctypes.c_wchar
+    LPCWSTR = ctypes.c_wchar_p
+    WPARAM = ctypes.c_size_t  # UINT_PTR
+    LPARAM = ctypes.c_ssize_t  # LONG_PTR
+
+    class POINT(ctypes.Structure):
+        _fields_ = (("x", ctypes.c_long), ("y", ctypes.c_long))
+
+    class MSG(ctypes.Structure):
+        _fields_ = (
+            ("hwnd", ctypes.c_void_p),
+            ("message", ctypes.c_uint32),
+            ("wParam", ctypes.c_size_t),
+            ("lParam", ctypes.c_ssize_t),
+            ("time", ctypes.c_uint32),
+            ("pt", ctypes.c_long * 2),
+        )
+
+
 class GUID(ctypes.Structure):
     _fields_ = (
-        ("Data1", wintypes.DWORD),
-        ("Data2", wintypes.WORD),
-        ("Data3", wintypes.WORD),
+        ("Data1", wt.DWORD),
+        ("Data2", wt.WORD),
+        ("Data3", wt.WORD),
         ("Data4", ctypes.c_ubyte * 8),
     )
 
@@ -66,19 +93,19 @@ class NOTIFYICONDATAW(ctypes.Structure):
     """The Vista-and-later layout of ``NOTIFYICONDATAW``."""
 
     _fields_ = (
-        ("cbSize", wintypes.DWORD),
+        ("cbSize", wt.DWORD),
         ("hWnd", HANDLE),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
+        ("uID", wt.UINT),
+        ("uFlags", wt.UINT),
+        ("uCallbackMessage", wt.UINT),
         ("hIcon", HANDLE),
-        ("szTip", wintypes.WCHAR * 128),
-        ("dwState", wintypes.DWORD),
-        ("dwStateMask", wintypes.DWORD),
-        ("szInfo", wintypes.WCHAR * 256),
-        ("uTimeout", wintypes.UINT),  # a union with uVersion
-        ("szInfoTitle", wintypes.WCHAR * 64),
-        ("dwInfoFlags", wintypes.DWORD),
+        ("szTip", wt.WCHAR * 128),
+        ("dwState", wt.DWORD),
+        ("dwStateMask", wt.DWORD),
+        ("szInfo", wt.WCHAR * 256),
+        ("uTimeout", wt.UINT),  # a union with uVersion
+        ("szInfoTitle", wt.WCHAR * 64),
+        ("dwInfoFlags", wt.DWORD),
         ("guidItem", GUID),
         ("hBalloonIcon", HANDLE),
     )
@@ -86,8 +113,8 @@ class NOTIFYICONDATAW(ctypes.Structure):
 
 class WNDCLASSEXW(ctypes.Structure):
     _fields_ = (
-        ("cbSize", wintypes.UINT),
-        ("style", wintypes.UINT),
+        ("cbSize", wt.UINT),
+        ("style", wt.UINT),
         ("lpfnWndProc", HANDLE),
         ("cbClsExtra", ctypes.c_int),
         ("cbWndExtra", ctypes.c_int),
@@ -95,33 +122,33 @@ class WNDCLASSEXW(ctypes.Structure):
         ("hIcon", HANDLE),
         ("hCursor", HANDLE),
         ("hbrBackground", HANDLE),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
+        ("lpszMenuName", wt.LPCWSTR),
+        ("lpszClassName", wt.LPCWSTR),
         ("hIconSm", HANDLE),
     )
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = (
-        ("biSize", wintypes.DWORD),
+        ("biSize", wt.DWORD),
         ("biWidth", ctypes.c_long),
         ("biHeight", ctypes.c_long),
-        ("biPlanes", wintypes.WORD),
-        ("biBitCount", wintypes.WORD),
-        ("biCompression", wintypes.DWORD),
-        ("biSizeImage", wintypes.DWORD),
+        ("biPlanes", wt.WORD),
+        ("biBitCount", wt.WORD),
+        ("biCompression", wt.DWORD),
+        ("biSizeImage", wt.DWORD),
         ("biXPelsPerMeter", ctypes.c_long),
         ("biYPelsPerMeter", ctypes.c_long),
-        ("biClrUsed", wintypes.DWORD),
-        ("biClrImportant", wintypes.DWORD),
+        ("biClrUsed", wt.DWORD),
+        ("biClrImportant", wt.DWORD),
     )
 
 
 class ICONINFO(ctypes.Structure):
     _fields_ = (
-        ("fIcon", wintypes.BOOL),
-        ("xHotspot", wintypes.DWORD),
-        ("yHotspot", wintypes.DWORD),
+        ("fIcon", wt.BOOL),
+        ("xHotspot", wt.DWORD),
+        ("yHotspot", wt.DWORD),
         ("hbmMask", HANDLE),
         ("hbmColor", HANDLE),
     )
@@ -177,20 +204,20 @@ class _Api:
         self.shell32 = ctypes.WinDLL("shell32", use_last_error=True)  # type: ignore[attr-defined]
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         self.WNDPROC = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]
-            LRESULT, HANDLE, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+            LRESULT, HANDLE, wt.UINT, wt.WPARAM, wt.LPARAM
         )
         self._declare()
 
     def _declare(self) -> None:
         u, g, s, k = self.user32, self.gdi32, self.shell32, self.kernel32
         u.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
-        u.RegisterClassExW.restype = wintypes.ATOM
-        u.UnregisterClassW.argtypes = [wintypes.LPCWSTR, HANDLE]
+        u.RegisterClassExW.restype = wt.ATOM
+        u.UnregisterClassW.argtypes = [wt.LPCWSTR, HANDLE]
         u.CreateWindowExW.argtypes = [
-            wintypes.DWORD,
-            wintypes.LPCWSTR,
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
+            wt.DWORD,
+            wt.LPCWSTR,
+            wt.LPCWSTR,
+            wt.DWORD,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
@@ -201,35 +228,35 @@ class _Api:
             HANDLE,
         ]
         u.CreateWindowExW.restype = HANDLE
-        u.DefWindowProcW.argtypes = [HANDLE, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        u.DefWindowProcW.argtypes = [HANDLE, wt.UINT, wt.WPARAM, wt.LPARAM]
         u.DefWindowProcW.restype = LRESULT
         u.DestroyWindow.argtypes = [HANDLE]
-        u.PostMessageW.argtypes = [HANDLE, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        u.PostMessageW.argtypes = [HANDLE, wt.UINT, wt.WPARAM, wt.LPARAM]
         u.PostQuitMessage.argtypes = [ctypes.c_int]
         u.GetMessageW.argtypes = [
-            ctypes.POINTER(wintypes.MSG),
+            ctypes.POINTER(wt.MSG),
             HANDLE,
-            wintypes.UINT,
-            wintypes.UINT,
+            wt.UINT,
+            wt.UINT,
         ]
         u.PeekMessageW.argtypes = [
-            ctypes.POINTER(wintypes.MSG),
+            ctypes.POINTER(wt.MSG),
             HANDLE,
-            wintypes.UINT,
-            wintypes.UINT,
-            wintypes.UINT,
+            wt.UINT,
+            wt.UINT,
+            wt.UINT,
         ]
-        u.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
-        u.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        u.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+        u.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
         u.DispatchMessageW.restype = LRESULT
-        u.SetTimer.argtypes = [HANDLE, ctypes.c_size_t, wintypes.UINT, HANDLE]
+        u.SetTimer.argtypes = [HANDLE, ctypes.c_size_t, wt.UINT, HANDLE]
         u.SetTimer.restype = ctypes.c_size_t
         u.KillTimer.argtypes = [HANDLE, ctypes.c_size_t]
         u.CreatePopupMenu.restype = HANDLE
-        u.AppendMenuW.argtypes = [HANDLE, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+        u.AppendMenuW.argtypes = [HANDLE, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
         u.TrackPopupMenu.argtypes = [
             HANDLE,
-            wintypes.UINT,
+            wt.UINT,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
@@ -238,9 +265,9 @@ class _Api:
         ]
         u.DestroyMenu.argtypes = [HANDLE]
         u.GetMenuItemCount.argtypes = [HANDLE]
-        u.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        u.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
         u.SetForegroundWindow.argtypes = [HANDLE]
-        u.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+        u.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
         u.GetSystemMetrics.argtypes = [ctypes.c_int]
         u.GetDC.argtypes = [HANDLE]
         u.GetDC.restype = HANDLE
@@ -251,26 +278,26 @@ class _Api:
         g.CreateDIBSection.argtypes = [
             HANDLE,
             ctypes.c_void_p,
-            wintypes.UINT,
+            wt.UINT,
             ctypes.POINTER(ctypes.c_void_p),
             HANDLE,
-            wintypes.DWORD,
+            wt.DWORD,
         ]
         g.CreateDIBSection.restype = HANDLE
         g.CreateBitmap.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
-            wintypes.UINT,
-            wintypes.UINT,
+            wt.UINT,
+            wt.UINT,
             ctypes.c_void_p,
         ]
         g.CreateBitmap.restype = HANDLE
         g.DeleteObject.argtypes = [HANDLE]
-        s.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
-        k.CreateMutexW.argtypes = [HANDLE, wintypes.BOOL, wintypes.LPCWSTR]
+        s.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+        k.CreateMutexW.argtypes = [HANDLE, wt.BOOL, wt.LPCWSTR]
         k.CreateMutexW.restype = HANDLE
         k.CloseHandle.argtypes = [HANDLE]
-        k.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        k.GetModuleHandleW.argtypes = [wt.LPCWSTR]
         k.GetModuleHandleW.restype = HANDLE
 
 
@@ -480,7 +507,7 @@ class TrayApp:
         self.controller.tick()
         view = self.controller.view()
         root, mapping = self.build_menu(view.menu)
-        point = wintypes.POINT()
+        point = wt.POINT()
         u.GetCursorPos(ctypes.byref(point))
         u.SetForegroundWindow(self.hwnd)  # or the menu will not close when you click elsewhere
         chosen = u.TrackPopupMenu(
@@ -538,7 +565,7 @@ class TrayApp:
     def pump(self) -> int:
         """Handle the messages waiting now (a test's way to run the loop). Returns how many."""
         u = _api().user32
-        msg = wintypes.MSG()
+        msg = wt.MSG()
         count = 0
         while u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
             u.TranslateMessage(ctypes.byref(msg))
@@ -548,7 +575,7 @@ class TrayApp:
 
     def run_loop(self) -> None:
         u = _api().user32
-        msg = wintypes.MSG()
+        msg = wt.MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             u.TranslateMessage(ctypes.byref(msg))
             u.DispatchMessageW(ctypes.byref(msg))

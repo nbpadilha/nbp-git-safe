@@ -20,6 +20,29 @@ Legend: **[ ]** open, **[~]** partly done, **[x]** done.
 - [ ] Decide on **PyPI**. The package metadata, sdist contents and a CI `package` job are prepared, nothing
       is published. Prefer GitHub Actions trusted publishing (OIDC) over a long-lived token.
 
+## 1b. Several repositories and the tray (branch `ci-tray`, awaiting security review)
+
+- [x] Per-user registry of repositories and the `registry` commands; `init` and `uninstall` keep it.
+- [x] `status|unlock|lock|seal|doctor --all`; `unlock --all` runs one `keyCommand` per distinct
+      argv; `seal --all [--push]` never unlocks.
+- [x] Windows autostart (`autostart install|remove|status`, per-user `Run` value).
+- [x] Windows tray (`nbp-git-safe tray`): icon colours, menu, balloons, periodic seal and push,
+      `tray.json`, rotating name-free log. Architecture and extension points: `docs/TRAY.md`.
+- [ ] **Independent security review** of this branch (registry parser, `unlock --all`, tray, autostart).
+- [ ] Hardening option: run the tray's unlock in a short-lived child process (`nbp-git-safe unlock`)
+      so the key never enters the long-lived tray process (see `THREAT_MODEL.md` section 8).
+- [ ] Not verified on real hardware: high-DPI and high-contrast themes, the password-manager prompt
+      raised from the tray, non-interactive sessions, Windows 10.
+- [ ] Elevated agent versus a non-elevated tray (same open item as the hooks, section 2).
+
+### Other platforms
+
+**Front ends for macOS (a menu-bar item) and Linux (a tray through StatusNotifier/AppIndicator) are
+welcome, by fork or pull request.** Everything except the window is already neutral and tested on
+Linux and macOS in CI: the registry, the `--all` commands, the model (`fleet.py`) and the controller
+(`traycontroller.py`). A port is the thin layer described in section 7 of
+[docs/TRAY.md](docs/TRAY.md); contribution notes are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## 2. Known gaps (backlog, in rough priority order)
 
 Security and robustness:

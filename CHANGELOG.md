@@ -4,6 +4,11 @@ All notable changes. The format follows "Keep a Changelog"; versions follow SemV
 
 ## Unreleased
 
+### Changed
+
+- `gitutil.hide_child_windows()` (used by the tray, which runs without a console) starts git and the
+  key command with `CREATE_NO_WINDOW`; nothing changes for the command line.
+
 ### Fixed
 
 - The package metadata said 0.1.0 while this changelog and the `v0.1.1` tag said 0.1.1:
@@ -16,6 +21,30 @@ All notable changes. The format follows "Keep a Changelog"; versions follow SemV
 
 ### Added
 
+- **Several repositories.** A per-user registry of repositories (`repos.json`: absolute canonical
+  paths and dates only, strict reading, atomic locked writes, `.bak` before a damaged file is
+  replaced); `init` registers and `uninstall` forgets; `nbp-git-safe registry list|add|remove|prune`.
+- `status|unlock|lock|seal|doctor --all`: one block per repository, a failure never stops the others,
+  an aggregate exit code. `unlock --all` runs each distinct `keyCommand` once (the `unlock()` flow takes
+  an optional key source; the key still goes only to an agent it just started, over the authenticated
+  channel, and the group's buffer is zeroed). `seal --all` never unlocks; `--push` pushes the vault
+  branch without force where `autoPush` and an `origin` exist and treats an unreachable origin as
+  non-fatal.
+- **Windows tray** (`nbp-git-safe tray`, no new dependency, `ctypes` only): a status circle (green,
+  yellow, red, gray), a per-repository menu (unlock, lock, seal now, open folder, auto-unlock) and
+  global commands, balloons for expiring keys, unsealed files and failures, and a periodic seal (and
+  push, if configured) of the unlocked repositories. One instance per session, `tray.json`
+  configuration (`tray --config`), a name-free rotating log, `unlockAtLogin` (off by default).
+  `nbp-git-safe autostart install|remove|status` manages the per-user `Run` value.
+- Layers for other platforms: `fleet.py` (pure model), `fleetops.py`, `traycontroller.py` (the brain a
+  front end drives) and `docs/TRAY.md`. macOS and Linux front ends are welcome as forks or pull requests.
+- `THREAT_MODEL.md` section 8 for the new surface.
+- Tests: the registry (hostile entries, damaged files, concurrent writers in threads and processes),
+  the pure model with case tables and an injected clock, the controller with fake operations, real git
+  integration (one key command per distinct `keyCommand`, `--all` past a broken repository, `seal --all`
+  never unlocking, push rules, leak scans of every file the tray writes), fixed-seed fuzzing of the
+  registry and tray-configuration parsers, the Windows `Run` value in a throw-away key, and a smoke test
+  of the real window and message loop (skipped without a desktop).
 - Package: PyPI classifiers, keywords and project URLs; an explicit sdist file list (no internal
   plan, no upstream test suite, no CI files, no lockfile); `scripts/check_package.py` and a CI job
   `package` that builds the wheel and sdist, checks them and runs the entry points from a clean

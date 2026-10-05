@@ -44,6 +44,12 @@ Non-negotiable invariants (keep them in every change):
   and a rewritten purge test) was green in CI and was **merged into `main`** together with this file.
   Remote working branches `ci-final` and `ci-posix-fix` were deleted afterwards.
 - A `0.1.1` tag **does not exist yet** (see `ROADMAP.md` section 1).
+- Branch `ci-tray` (not merged; awaiting the security review in `ROADMAP.md` section 1b): the per-user
+  registry, the `--all` commands, the Windows tray and autostart (`docs/TRAY.md`). New modules:
+  `registry`, `statefile`, `trayconfig`, `traylog`, `fleet`, `fleetops`, `fleetcli`, `traycontroller`,
+  `autostart`, `tray_win`; small edits in `agent` (`private_root`, `retry_sharing`), `gitutil`
+  (`hide_child_windows`), `unlock` (`key_source`) and `cli`. The tests never touch the real per-user
+  directory: `NBP_SAFE_RUNTIME_DIR` through the existing fixtures.
 - Test suite: about 900 tests; the full run takes ~25-30 minutes locally on Windows, ~5 min on Linux CI,
   ~12 min on macOS, ~30 min on Windows CI. `crypto.py` must stay at 100% branch coverage (CI gate).
 - Dogfooding on a private repository (about 60 files, 10 MiB): first `seal` took 2-6 s, a clean clone without

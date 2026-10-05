@@ -64,6 +64,7 @@ include = [
   "/docs/GUARD.md",
   "/docs/MULTI.md",
   "/docs/RELEASING.md",
+  "/docs/TRAY.md",
   "/CHANGELOG.md",
   "/CONTRIBUTING.md",
   "/LICENSE",

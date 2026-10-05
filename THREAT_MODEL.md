@@ -241,3 +241,50 @@ this repository. What came out of it:
 * **Fail-closed paths behaved as designed** with a killed agent, an expired TTL, a locked agent
   (seal refuses, commits of code still work, a hint is printed) and a remote that moved ahead
   (the push is rejected; `sync` merges; both versions of a file edited on two machines are kept).
+
+## 8. Several repositories, `--all`, the tray and autostart
+
+New surface added by `docs/TRAY.md`. What it adds, what it does not change, and where it is weaker.
+
+**What does not change.** The key is never written to disk, put in an argument, an environment
+variable, a log or a message. Everything fails closed. `keyCommand` is read only from the local
+`.git/config` of each repository, never from a versioned file and never from the registry. There is
+no force-push, no `--no-verify`, no network except the opt-in push, no telemetry, no LLM, and no new
+runtime dependency (the tray is `ctypes`). The agent, its channel and its checks are untouched.
+
+| Piece | What it is | Trust and limits |
+|---|---|---|
+| Registry (`repos.json`) | absolute canonical paths and dates | lives in the private per-user directory (owner, ACL or mode checked on every use, no links); read strictly (relative, `..`, UNC, device, non-canonical, control-character or oversized input is ignored with a warning, never executed, never a reason to fail open); written atomically under a lock; a damaged file is moved to `.bak`, never overwritten silently. Nothing in it is a command. |
+| `unlock --all` | one `keyCommand` run per group of identical argv | the key goes to each agent of the group exactly as `unlock` does it (an agent this process just started and authenticated, over the authenticated channel). A group whose command fails fails as a group (no repeated prompts). Identical argv means the same command, which gives the same key by construction; a repository that shares a command but has another vault key fails later with a key-id mismatch (closed). |
+| `seal --all [--push]` | seals unlocked repositories | never unlocks. The push is `git push origin refs/heads/nbp-safe`, no force, never tags, only with `autoPush` and an `origin`, never prompting, abandoning stalled transfers; git's output is not repeated. |
+| Tray process | per-user, per-session, one instance | holds no key at rest and has no listening socket or pipe of its own; it talks to agents as any other client (same handshake, same pid and user checks). Menu commands are numeric ids that map only to the ids the tray itself built, parsed by a strict function: no window message can inject a command string. A window message from another process of the same user can at most make the tray redraw. |
+| Autostart | one value in `HKCU\...\Run` | absolute paths, quoted, no shell, `python -I`. Anything that can write your `Run` key can already run code at login; the value is one more such entry, and `autostart status` shows whether it is still what `install` would write. |
+| Tray configuration and log | `tray.json`, `tray.log` | strict validation; the log carries codes and counts only (a writer that replaces anything else by `?`). |
+
+**Where it is weaker, honestly.**
+
+1. **A process that runs as you can add a repository to the registry** (it can write that
+   directory). `unlock --all`, or the tray's *Unlock all*, would then run the `keyCommand` of that
+   repository's own `.git/config`. This crosses no boundary that was not already open (such a process
+   can run `nbp-git-safe unlock` or anything else itself), but the registry is not a safeguard:
+   `registry list` and the names in every `--all` output and in the tray menu show what is listed.
+2. **The tray is a long-lived process that sees the key.** `unlock --all` and the tray's *Unlock*
+   pass the key through the process that runs them, as the command line does, but the command line
+   exits and the tray does not. Python does not wipe memory: the group's buffer is zeroed, but the
+   immutable copies the interpreter made may stay in the heap (and in a crash dump or the page file)
+   until they are overwritten, **after** the agent has expired. Anything running as you can read the
+   agent's memory while it is unlocked anyway; the extra exposure is a copy that outlives the TTL in
+   a process that keeps running. A hardening option (run the unlock in a short-lived child process
+   so the key never enters the tray) is in `ROADMAP.md`.
+3. **The periodic seal makes the vault follow the working tree.** Any process that writes into the
+   protected paths while the agent is unlocked gets its file sealed within the interval (and pushed,
+   if `sealPush` is on and `autoPush` is set), without a commit. Contents are encrypted, but their
+   existence, size bucket and timing reach the remote earlier and without a gesture from you. Both
+   `sealPush` and `unlockAtLogin` are off by default.
+4. **`unlockAtLogin` and *Auto-unlock*** trade a prompt for convenience: the first makes the
+   tray run the key commands once at start, the second lets hooks run them (existing behaviour).
+5. **Elevation.** A tray at one integrity level cannot inspect an agent at the other: it shows
+   `other-elevation` and sends nothing to it.
+6. **Console-less process.** The tray runs under `pythonw`; children (git, the key command) are
+   started with `CREATE_NO_WINDOW`. A key command that must prompt in a console cannot work from the
+   tray.

@@ -161,6 +161,40 @@ Without the key a clone only shows `store/<hex>` objects. `git pull` keeps the m
 three-way merge by file id; when both edited the same file, both versions are kept (one as
 `<name>.conflict-<hex>.<ext>`). Nothing is ever force-pushed. See [docs/MULTI.md](docs/MULTI.md).
 
+## Several repositories and the Windows tray
+
+`nbp-git-safe init` also puts the repository in a small per-user registry (absolute paths and dates,
+nothing else; `registry list|add|remove|prune`). It is only a list of where to look: every operation
+still reads the configuration of the repository itself, and `keyCommand` is still read only from its
+local `.git/config`.
+
+```
+nbp-git-safe status --all             # every registered repository, one block each
+nbp-git-safe unlock --all             # one keyCommand run per distinct keyCommand, not per repository
+nbp-git-safe seal --all --push        # unlocked ones only; never unlocks; push = no force, opt-in
+nbp-git-safe lock --all
+nbp-git-safe doctor --all
+```
+
+A failure in one repository never stops the others, and the exit code says whether anything failed.
+Repositories whose `keyCommand` is identical share **one** run of it: the password manager asks once
+per distinct key, and the key goes to each agent over the usual authenticated channel (never into an
+argument, an environment variable, a file or a message).
+
+On Windows a notification-area icon shows all of them at a glance (green: all unlocked; yellow: some
+locked or under an hour left; red: a problem, a diverged vault or files left unsealed; gray: none
+registered), unlocks and locks from a menu, and seals unsealed files in the background every 15
+minutes, which closes the gap between "a script wrote a file" and "the next commit":
+
+```
+nbp-git-safe autostart install        # start the tray at login (per user, no administrator)
+nbp-git-safe tray                     # or run it now
+nbp-git-safe tray --config unlockAtLogin=true sealIntervalMinutes=30
+```
+
+The tray holds no key, writes only codes and counts to its log, and uses no dependency (`ctypes`).
+Architecture, icon rules, menu, configuration, limits and how to write a macOS or Linux front end
+(**welcome as a fork or pull request**): [docs/TRAY.md](docs/TRAY.md).
 ## Key rotation and erasure
 
 * `nbp-git-safe rotate` re-encrypts the current state under a **new key** into a new branch
@@ -227,7 +261,7 @@ uv run pytest -q             # unit + integration + leak tests, with real git in
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Design: [PLAN-SPEC.md](PLAN-SPEC.md). Format:
 [docs/FORMAT.md](docs/FORMAT.md). Hooks: [docs/GUARD.md](docs/GUARD.md). Multi-machine:
-[docs/MULTI.md](docs/MULTI.md).
+[docs/MULTI.md](docs/MULTI.md). Several repositories and the tray: [docs/TRAY.md](docs/TRAY.md).
 
 License: MIT. Derived from [transcrypt](https://github.com/elasticdog/transcrypt); see `NOTICE`.
 
@@ -250,3 +284,9 @@ trabalho; o remoto ainda ve quantidade, tamanho aproximado e momento das mudanca
 expoe todo o historico (rotacionar protege so o que vier depois); `--no-verify` e `git add -f`
 furam as protecoes locais; apagar de verdade (LGPD) exige reescrever o historico. Veja
 [SECURITY.md](SECURITY.md) e [THREAT_MODEL.md](THREAT_MODEL.md).
+
+Varios repositorios: `init` registra o repositorio numa lista por usuario (so caminhos e datas);
+`status|unlock|lock|seal|doctor --all` percorrem todos, e `unlock --all` roda cada `keyCommand`
+distinto uma unica vez (o gerenciador de senhas pergunta uma vez por chave). No Windows,
+`nbp-git-safe autostart install` e `nbp-git-safe tray` colocam um icone na bandeja (verde, amarelo,
+vermelho, cinza) que destrava, trava e sela em segundo plano. Veja [docs/TRAY.md](docs/TRAY.md).
