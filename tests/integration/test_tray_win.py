@@ -190,3 +190,102 @@ def test_the_message_loop_runs_wakes_and_quits_cleanly() -> None:
     assert done.wait(20), "the message loop did not end"
     thread.join(5)
     assert box["icon_after_loop"] is False  # WM_DESTROY removed the icon
+
+
+# ---------------------------------------------------- review findings (single instance, messages)
+
+
+class FakeKernel:
+    """``CreateMutexW`` that answers like Windows does for one situation."""
+
+    def __init__(self, handle: int) -> None:
+        self.handle = handle
+        self.closed: list[int] = []
+
+    def CreateMutexW(self, *_args: object) -> int:
+        return self.handle
+
+    def CloseHandle(self, handle: int) -> None:
+        self.closed.append(handle)
+
+
+class FakeApi:
+    def __init__(self, kernel: FakeKernel) -> None:
+        self.kernel32 = kernel
+
+
+@windows_only
+@pytest.mark.parametrize(
+    ("handle", "error", "expected"),
+    [
+        (0, tray_win.ERROR_ACCESS_DENIED, "denied"),  # the name exists and is not ours to open
+        (0, 8, "oserror"),  # some other failure
+        (77, tray_win.ERROR_ALREADY_EXISTS, None),  # another instance of ours
+        (77, 0, 77),  # the first one
+    ],
+)
+def test_the_mutex_tells_denied_from_already_running(
+    monkeypatch: pytest.MonkeyPatch, handle: int, error: int, expected: object
+) -> None:
+    kernel = FakeKernel(handle)
+    monkeypatch.setattr(tray_win, "_api", lambda: FakeApi(kernel))
+    monkeypatch.setattr(tray_win.ctypes, "get_last_error", lambda: error)
+    if expected == "denied":
+        with pytest.raises(tray_win.MutexDeniedError):
+            tray_win.acquire_single_instance("x")
+    elif expected == "oserror":
+        with pytest.raises(OSError) as caught:
+            tray_win.acquire_single_instance("x")
+        assert not isinstance(caught.value, tray_win.MutexDeniedError)
+    else:
+        assert tray_win.acquire_single_instance("x") == expected
+    assert kernel.closed == ([77] if error == tray_win.ERROR_ALREADY_EXISTS else [])
+
+
+@windows_only
+def test_a_denied_mutex_is_reported_and_has_its_own_exit_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from nbp_git_safe import agent, gitutil
+
+    shown: list[str] = []
+
+    def denied(_name: str) -> int:
+        raise tray_win.MutexDeniedError(5, "denied")
+
+    monkeypatch.setattr(gitutil, "_hide_windows", False)  # run() switches it on; restored after
+    monkeypatch.setattr(tray_win, "acquire_single_instance", denied)
+    monkeypatch.setattr(tray_win, "message_box", shown.append)
+    code = tray_win.run()
+    assert code == tray_win.EXIT_MUTEX_DENIED and code not in (
+        tray_win.EXIT_OK,
+        tray_win.EXIT_NO_ICON,
+    )
+    assert len(shown) == 1 and "another account" in shown[0]  # a person is told, not left guessing
+    assert "another account" in capsys.readouterr().err
+    log = (agent.runtime_root() / "tray.log").read_text(encoding="ascii")
+    assert "code=mutex-denied" in log
+
+
+@windows_only
+def test_tray_messages_need_the_icons_own_id_and_the_menu_does_not_reenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = tray_win.TrayApp(quiet_controller())
+    shown: list[int] = []
+    monkeypatch.setattr(app, "show_menu", lambda: shown.append(1))
+    app._on_message(0, tray_win.WM_TRAY, 999, tray_win.WM_RBUTTONUP)  # not our icon's id
+    app._on_message(0, tray_win.WM_TRAY, tray_win.ICON_ID, 0x0200)  # a mouse move: not a click
+    assert shown == []
+    app._on_message(0, tray_win.WM_TRAY, tray_win.ICON_ID, tray_win.WM_RBUTTONUP)
+    assert shown == [1]
+    monkeypatch.undo()
+    inner: list[int] = []
+
+    def reentrant() -> None:
+        inner.append(1)
+        app.show_menu()  # a message that arrives while the menu is open
+
+    monkeypatch.setattr(app, "_show_menu", reentrant)
+    app.show_menu()
+    assert inner == [1] and app._menu_open is False

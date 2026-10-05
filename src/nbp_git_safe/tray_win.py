@@ -22,7 +22,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from nbp_git_safe import agent, autostart, fleet, gitutil, trayconfig, traycontroller
+from nbp_git_safe import (
+    agent,
+    autostart,
+    fleet,
+    gitutil,
+    trayconfig,
+    traycontroller,
+    unlockchild,
+)
 from nbp_git_safe.traylog import LOG_NAME, TrayLog
 
 # window messages and flags (winuser.h, shellapi.h)
@@ -44,6 +52,11 @@ MF_STRING, MF_GRAYED, MF_CHECKED, MF_POPUP, MF_SEPARATOR = 0x0, 0x1, 0x8, 0x10, 
 TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD = 0x2, 0x80, 0x100
 SM_CXSMICON = 49
 ERROR_ALREADY_EXISTS = 183
+ERROR_ACCESS_DENIED = 5
+MB_OK, MB_ICONERROR = 0x0, 0x10
+EXIT_OK = 0
+EXIT_NO_ICON = 1
+EXIT_MUTEX_DENIED = 4  # the single-instance name belongs to someone else
 ICON_ID = 1
 MENU_LABEL_MAX = 90
 FIRST_MENU_ID = 1000
@@ -268,6 +281,8 @@ class _Api:
         u.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
         u.SetForegroundWindow.argtypes = [HANDLE]
         u.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
+        u.MessageBoxW.argtypes = [HANDLE, wt.LPCWSTR, wt.LPCWSTR, wt.UINT]
+        u.MessageBoxW.restype = ctypes.c_int
         u.GetSystemMetrics.argtypes = [ctypes.c_int]
         u.GetDC.argtypes = [HANDLE]
         u.GetDC.restype = HANDLE
@@ -309,16 +324,33 @@ def _api() -> _Api:
     return _apis[0]  # type: ignore[no-any-return]
 
 
+class MutexDeniedError(OSError):
+    """The single-instance name exists and this process may not open it: it belongs to another
+    account or to a process of another privilege level. That is NOT "the tray is already running"
+    (it is not ours), and the tray must say so instead of leaving without a word."""
+
+
 def acquire_single_instance(name: str) -> int | None:
-    """Create the named mutex. Returns its handle, or ``None`` when another instance holds it."""
+    """Create the named mutex. Returns its handle, or ``None`` when another instance of OURS holds
+    it. ``MutexDeniedError`` when the name is held by someone this process cannot open (access
+    denied); any other failure is an ``OSError``."""
     api = _api()
     handle = api.kernel32.CreateMutexW(None, False, name)
+    error = ctypes.get_last_error()  # type: ignore[attr-defined]
     if not handle:
-        return None
-    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:  # type: ignore[attr-defined]
+        if error == ERROR_ACCESS_DENIED:
+            raise MutexDeniedError(error, "the single-instance name is held by another account")
+        raise OSError(error, "could not create the single-instance mutex")
+    if error == ERROR_ALREADY_EXISTS:
         api.kernel32.CloseHandle(handle)
         return None
     return int(handle)
+
+
+def message_box(text: str) -> None:
+    """A message the user cannot miss: ``pythonw`` has no console to print to."""
+    with contextlib.suppress(Exception):
+        _api().user32.MessageBoxW(None, text, "nbp-git-safe", MB_OK | MB_ICONERROR)
 
 
 def make_icon(bgra: bytes, size: int) -> int:
@@ -366,6 +398,7 @@ class TrayApp:
         self._class_registered = False
         self.quitting = False
         self.icon_added = False
+        self._menu_open = False
 
     # ------------------------------------------------------------------ creation
 
@@ -502,6 +535,15 @@ class TrayApp:
         return int(root), mapping
 
     def show_menu(self) -> None:
+        if self._menu_open:  # the menu's own message loop must not open a second menu
+            return
+        self._menu_open = True
+        try:
+            self._show_menu()
+        finally:
+            self._menu_open = False
+
+    def _show_menu(self) -> None:
         api = _api()
         u = api.user32
         self.controller.tick()
@@ -539,7 +581,11 @@ class TrayApp:
                 self.sync()
                 return 0
             if message == WM_TRAY:
-                if lparam in (WM_RBUTTONUP, WM_LBUTTONUP, WM_CONTEXTMENU):
+                # The shell sends the icon's own id; a message posted by another process of the
+                # same user cannot be told from a real one by its origin (there is none), but it
+                # can be refused when it does not even carry our id. What it can still do is make
+                # the menu appear, never choose an item: see THREAT_MODEL.md
+                if wparam == ICON_ID and lparam in (WM_RBUTTONUP, WM_LBUTTONUP, WM_CONTEXTMENU):
                     self.show_menu()
                 return 0
             if self._taskbar_created and message == self._taskbar_created:
@@ -630,10 +676,25 @@ def run() -> int:
     gitutil.hide_child_windows()
     with contextlib.suppress(Exception):  # sharper icons and menus on scaled displays
         _api().user32.SetProcessDPIAware()
-    handle = acquire_single_instance(mutex_name(winsec.current_user_sid()))
+    try:
+        handle = acquire_single_instance(mutex_name(winsec.current_user_sid()))
+    except MutexDeniedError:
+        text = (
+            "The tray did not start: its single-instance name is held by another account or by "
+            "a program running with other privileges. Close that program, or sign out and in "
+            "again; `nbp-git-safe tray` will then start."
+        )
+        _make_log().write("error", None, job="start", code="mutex-denied")
+        message_box(text)
+        sys.stderr.write(f"nbp-git-safe: {text}\n")
+        return EXIT_MUTEX_DENIED
+    except OSError:
+        _make_log().write("error", None, job="start", code="mutex-failed")
+        message_box("The tray did not start: it could not create its single-instance marker.")
+        return EXIT_NO_ICON
     if handle is None:
         sys.stderr.write("nbp-git-safe: the tray is already running\n")
-        return 0
+        return EXIT_OK
     app: TrayApp | None = None
 
     def wake() -> None:
@@ -647,12 +708,13 @@ def run() -> int:
         open_folder=_open_folder,
         open_config=_open_config,
         wake=wake,
+        unlock_runner=unlockchild.run_in_child,  # the key never enters this long-lived process
     )
     app = TrayApp(controller)
     if not app.create():
         sys.stderr.write("nbp-git-safe: could not create the notification icon\n")
         _api().kernel32.CloseHandle(handle)
-        return 1
+        return EXIT_NO_ICON
     controller.start()
     app.wake()
     try:

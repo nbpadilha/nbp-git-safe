@@ -133,3 +133,60 @@ def test_a_value_of_the_wrong_type_is_reported_and_replaced(temp_key: str) -> No
 def test_the_real_run_key_is_not_the_default_of_these_tests() -> None:
     assert autostart.RUN_KEY == r"Software\Microsoft\Windows\CurrentVersion\Run"
     assert autostart.VALUE_NAME == "nbp-git-safe-tray"
+
+
+# ------------------------------------------------------ review findings (B7): ACL and dead values
+
+
+def test_program_of_reads_quoted_and_plain_commands() -> None:
+    assert autostart.program_of(r'"C:\Program Files\Py\pythonw.exe" -I -m x') == (
+        r"C:\Program Files\Py\pythonw.exe"
+    )
+    assert autostart.program_of(r"C:\Py\pythonw.exe -I -m x") == r"C:\Py\pythonw.exe"
+    assert autostart.program_of('"unterminated') is None and autostart.program_of("  ") is None
+
+
+def test_a_stored_value_that_names_a_missing_program_is_reported(tmp_path: Path) -> None:
+    exe = tmp_path / "pythonw.exe"
+    exe.write_bytes(b"")
+    live = autostart.Status(True, f'"{exe}" -I -m nbp_git_safe tray', True)
+    assert autostart.stored_program_missing(live) is False
+    exe.unlink()  # the environment was removed or moved
+    assert autostart.stored_program_missing(live) is True
+    assert autostart.stored_program_missing(autostart.Status(False)) is False
+    assert autostart.stored_program_missing(autostart.Status(True, None, False)) is False
+
+
+@windows_only
+def test_install_refuses_an_interpreter_other_accounts_can_replace(
+    temp_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nbp_git_safe import winsec
+
+    seen: list[str] = []
+
+    def exposed(target: object) -> str | None:
+        seen.append(Path(str(target)).name)
+        return "can be changed by Users" if Path(str(target)).is_dir() else None
+
+    monkeypatch.setattr(winsec, "write_exposure", exposed)
+    with pytest.raises(AutostartError, match=r"not installed.*its folder can be changed by Users"):
+        autostart.install(temp_key)
+    assert autostart.status(temp_key).installed is False  # nothing was written
+    assert Path(autostart.tray_executable()).name in seen  # the program AND its folder are asked
+    done = autostart.install(temp_key, allow_writable=True)  # knowingly
+    assert done.action == "installed"
+    # an explicit command (what the tests of this module use) is not an interpreter to vet
+    monkeypatch.setattr(winsec, "write_exposure", lambda _t: "can be changed by Users")
+    assert autostart.install(temp_key, command="x -m y").action == "updated"
+
+
+@windows_only
+def test_a_safe_interpreter_installs_without_the_override(
+    temp_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nbp_git_safe import winsec
+
+    monkeypatch.setattr(winsec, "write_exposure", lambda _t: None)
+    assert autostart.install(temp_key).action == "installed"
+    assert autostart.exposure_problem(autostart.tray_executable()) is None

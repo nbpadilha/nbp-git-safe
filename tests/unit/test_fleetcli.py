@@ -9,7 +9,7 @@ import contextlib
 import io
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -104,8 +104,19 @@ class FakeAutostart:
     installed: bool = False
     current: bool = True
     raises: bool = False
+    missing: bool = False  # the stored program is no longer on disk
+    exposure: str | None = None  # why another account could replace it
+    refuse_writable: bool = False  # install refuses an interpreter others can change
+    installs: list[bool] = field(default_factory=list)  # allow_writable of each install call
 
     AutostartError = autostart.AutostartError
+    program_of = staticmethod(autostart.program_of)
+
+    def stored_program_missing(self, _status: autostart.Status) -> bool:
+        return self.missing
+
+    def exposure_problem(self, _program: str) -> str | None:
+        return self.exposure
 
     def supported(self) -> bool:
         return self.supported_value
@@ -114,8 +125,11 @@ class FakeAutostart:
         if self.raises:
             raise autostart.AutostartError("cannot write the Run key (Access is denied)")
 
-    def install(self) -> autostart.InstallResult:
+    def install(self, *, allow_writable: bool = False) -> autostart.InstallResult:
         self._maybe()
+        self.installs.append(allow_writable)
+        if self.refuse_writable and not allow_writable:
+            raise autostart.AutostartError("not installed: its folder can be changed by Users")
         self.installed = True
         return autostart.InstallResult("installed", '"x" -I -m nbp_git_safe tray')
 
@@ -145,6 +159,34 @@ def test_autostart_commands_print_and_report(monkeypatch: pytest.MonkeyPatch) ->
     fake.raises = True
     code, _out, err = run("autostart", "install")
     assert code == 1 and "Access is denied" in err
+
+
+def test_autostart_status_warns_about_a_dead_or_replaceable_program(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeAutostart(installed=True)
+    monkeypatch.setattr(fleetcli, "autostart", fake)
+    assert "warning" not in run("autostart", "status")[1]
+    fake.missing = True  # the environment was moved or deleted: the value is dead
+    dead = run("autostart", "status")[1]
+    assert "no longer exists" in dead and "autostart remove" in dead
+    fake.missing, fake.exposure = False, "its folder can be changed by Users"
+    exposed = run("autostart", "status")[1]
+    assert (
+        "warning: its folder can be changed by Users" in exposed and "autostart remove" in exposed
+    )
+
+
+def test_autostart_install_refuses_a_replaceable_interpreter_unless_told_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeAutostart(refuse_writable=True)
+    monkeypatch.setattr(fleetcli, "autostart", fake)
+    code, _out, err = run("autostart", "install")
+    assert code == 1 and "not installed" in err
+    assert fake.installs == [False] and fake.installed is False
+    code, _out, _err = run("autostart", "install", "--allow-writable")
+    assert code == 0 and fake.installs == [False, True] and fake.installed is True
 
 
 def test_autostart_says_unsupported_with_exit_code_two(monkeypatch: pytest.MonkeyPatch) -> None:

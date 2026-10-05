@@ -11,6 +11,7 @@ needed, so this module loads everywhere; the functions raise ``AutostartError`` 
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -70,6 +71,36 @@ def tray_executable(executable: str | None = None) -> str:
     return text
 
 
+def exposure_problem(program: str) -> str | None:
+    """Why the program started at login (or the folder it sits in, where a replaced library or
+    program would be run instead) can be changed by another account; ``None`` when only the user,
+    SYSTEM and Administrators can. Windows only (the answer comes from the ACLs)."""
+    from nbp_git_safe import winsec
+
+    path = Path(program)
+    for target, what in ((path, "the program"), (path.parent, "its folder")):
+        problem = winsec.write_exposure(target)
+        if problem is not None:
+            return f"{what} {problem}"
+    return None
+
+
+def program_of(command: str) -> str | None:
+    """The executable named by a Run-key command line (quoted or not)."""
+    text = command.strip()
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        return text[1:end] if end > 1 else None
+    return text.split(" ", 1)[0] or None
+
+
+def stored_program_missing(status: Status) -> bool:
+    """The stored command names a program that is no longer on disk (a moved or deleted
+    environment): the value is dead and every login would fail silently."""
+    program = program_of(status.command) if status.installed and status.command else None
+    return program is not None and not os.path.isfile(program)
+
+
 def command_line(executable: str | None = None) -> str:
     """The Run-key value, quoted for paths with spaces (``list2cmdline`` rules)."""
     return subprocess.list2cmdline([tray_executable(executable), *TRAY_ARGS])
@@ -93,9 +124,24 @@ def status(key_path: str = RUN_KEY, *, command: str | None = None) -> Status:
     return Status(True, value, value == wanted)
 
 
-def install(key_path: str = RUN_KEY, *, command: str | None = None) -> InstallResult:
+def install(
+    key_path: str = RUN_KEY, *, command: str | None = None, allow_writable: bool = False
+) -> InstallResult:
+    """Write the Run value. Without an explicit ``command`` the interpreter that is running is
+    registered, and is REFUSED (``AutostartError``) when it or its folder can be changed by
+    another account (``allow_writable`` overrides, knowingly): anything started at every login
+    with the user's rights is only as safe as who can replace it."""
     reg = _winreg()
     wanted = command if command is not None else command_line()
+    if command is None and not allow_writable:
+        program = program_of(wanted)
+        problem = exposure_problem(program) if program else None
+        if problem is not None:
+            raise AutostartError(
+                f"not installed: {problem} (another account could replace what runs at every "
+                "login); use an interpreter in a folder only you control, or pass "
+                "--allow-writable to install it anyway"
+            )
     try:
         with reg.CreateKeyEx(
             reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_SET_VALUE | reg.KEY_QUERY_VALUE

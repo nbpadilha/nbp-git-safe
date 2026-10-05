@@ -177,7 +177,7 @@ def cmd_autostart(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     try:
         if action == "install":
-            result = autostart.install()
+            result = autostart.install(allow_writable=bool(getattr(args, "allow_writable", False)))
             _out(f"autostart {result.action}: {result.command}")
         elif action == "remove":
             _out("autostart removed" if autostart.remove() else "autostart was not installed")
@@ -191,10 +191,28 @@ def cmd_autostart(args: argparse.Namespace) -> int:
                     + ("" if status.current else " (points to another program; run install)")
                     + f"\n  {status.command}"
                 )
+                _autostart_warnings(status)
     except autostart.AutostartError as exc:
         _err(f"nbp-git-safe: error: {exc}")
         return EXIT_ERROR
     return EXIT_OK
+
+
+def _autostart_warnings(status: autostart.Status) -> None:
+    if autostart.stored_program_missing(status):
+        _out(
+            "  warning: that program no longer exists, so nothing starts at login; run "
+            "`nbp-git-safe autostart remove`, then `autostart install` from the environment "
+            "you use now"
+        )
+        return
+    program = autostart.program_of(status.command or "")
+    problem = autostart.exposure_problem(program) if program else None
+    if problem:
+        _out(
+            f"  warning: {problem}: another account could replace what runs at every login "
+            "(`autostart remove` undoes it)"
+        )
 
 
 # ---------------------------------------------------------------------------------- tray
