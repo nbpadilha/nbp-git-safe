@@ -106,5 +106,5 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 # asserts in these modules only narrow types for the checker; none guards security.
-"src/nbp_git_safe/{agent,cli,vault,multi,registry,trayconfig,traylog,fleetops,tray_win}.py" = ["S101"]
+"src/nbp_git_safe/{agent,cli,vault,multi,registry,trayconfig,traylog,fleetops,traycontroller,tray_win}.py" = ["S101"]
 "tests/**" = ["S101", "S603", "S607", "S105", "S106"]
