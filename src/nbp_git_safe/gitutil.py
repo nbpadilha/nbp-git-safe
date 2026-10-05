@@ -68,6 +68,22 @@ _GIT_INJECTION_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE")
 
 
 NO_CWD_EXE = "NoDefaultCurrentDirectoryInExePath"
+CREATE_NO_WINDOW = 0x08000000
+_hide_windows = False
+
+
+def hide_child_windows(on: bool = True) -> None:
+    """A process without a console (the tray runs under ``pythonw``) must start its console children
+    (git, the key command) with ``CREATE_NO_WINDOW``, or each one flashes a console window."""
+    global _hide_windows
+    _hide_windows = on
+
+
+def window_flags() -> dict[str, int]:
+    """``creationflags`` for a child process (empty unless ``hide_child_windows`` was called)."""
+    if _hide_windows and sys.platform == "win32":
+        return {"creationflags": CREATE_NO_WINDOW}
+    return {}
 
 
 def _norm(path: str | os.PathLike[str]) -> str:
@@ -223,6 +239,7 @@ class Git:
             input=input,
             capture_output=True,
             check=False,
+            **window_flags(),
         )
         if check and proc.returncode != 0:
             detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
@@ -247,6 +264,7 @@ class Git:
             input=input,
             capture_output=True,
             check=False,
+            **window_flags(),
         )
         return proc.returncode, proc.stdout, proc.stderr
 
@@ -263,6 +281,7 @@ class Git:
             input=input,
             capture_output=True,
             check=False,
+            **window_flags(),
         )
         return proc.stdout if proc.returncode == 0 else None
 
@@ -325,6 +344,7 @@ def hash_objects(git: Git, blobs: Sequence[bytes]) -> list[str]:
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        **window_flags(),
     )
     if proc.stdin is None or proc.stderr is None:
         raise GitError("git fast-import: no pipes")

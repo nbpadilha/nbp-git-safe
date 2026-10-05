@@ -15,10 +15,12 @@ from nbp_git_safe import (
     agent,
     crypto,
     doctor,
+    fleetcli,
     guard,
     hooks,
     multi,
     protect,
+    registry,
     unlock,
     vault,
 )
@@ -145,9 +147,22 @@ def cmd_init(args: argparse.Namespace) -> int:
             "nbp-git-safe: auto-push enabled: `git push` also sends the vault"
             + (f" (refspecs added: {', '.join(added)})" if added else " (already configured)")
         )
+    _register(repo)
     if args.generate_key:
         return cmd_keygen(args)
     return EXIT_OK
+
+
+def _register(repo: Repo) -> None:
+    """Remember the repository in the per-user registry (discovery for `--all` and the tray). The
+    protection never depends on it, so a registry that cannot be written is a warning."""
+    try:
+        added = registry.add(repo.toplevel)
+    except registry.RegistryError as exc:
+        _err(f"nbp-git-safe: warning: not added to the repository registry: {exc}")
+        return
+    if added:
+        _err("nbp-git-safe: repository added to the per-user registry (`registry list`)")
 
 
 def _adopt_remote_vault(git: Git, repo: Repo, cfg: Config, *, confirm: bool = False) -> None:
@@ -196,6 +211,8 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if args.all:
+        return fleetcli.run_all("doctor", args)
     repo, git, cfg = _context(args)
     findings = doctor.run_doctor(git, repo, cfg)
     for finding in findings:
@@ -226,6 +243,11 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         removed.append("exclude block removed")
     if protect.remove_gitignore_block(repo):
         removed.append(".gitignore block removed (a versioned file: commit the change)")
+    try:
+        if registry.remove(repo.toplevel):
+            removed.append("removed from the per-user registry")
+    except registry.RegistryError as exc:
+        _err(f"nbp-git-safe: warning: the repository registry was not updated: {exc}")
     for line in removed or ["nothing of ours was installed"]:
         _out(line)
     return EXIT_OK
@@ -285,6 +307,8 @@ def cmd_unprotect(args: argparse.Namespace) -> int:
 
 
 def cmd_unlock(args: argparse.Namespace) -> int:
+    if args.all:
+        return fleetcli.run_all("unlock", args)
     repo, _git, cfg = _context(args)
     newly, status = unlock.unlock(
         repo.state_dir,
@@ -299,12 +323,16 @@ def cmd_unlock(args: argparse.Namespace) -> int:
 
 
 def cmd_lock(args: argparse.Namespace) -> int:
+    if args.all:
+        return fleetcli.run_all("lock", args)
     repo, _git, _cfg = _context(args)
     _out("locked" if unlock.lock(repo.state_dir) else "agent was not running")
     return EXIT_OK
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    if args.all:
+        return fleetcli.run_all("status", args)
     repo, git, cfg = _context(args)
     status = unlock.current_status(repo.state_dir)
     remote = multi.remote_status(git, repo, cfg)
@@ -351,6 +379,10 @@ def _asker() -> Callable[[str], bool] | None:
 
 
 def cmd_seal(args: argparse.Namespace) -> int:
+    if args.all:
+        return fleetcli.run_all("seal", args)
+    if args.push:
+        raise CliError("--push goes with --all (for one repository: nbp-git-safe push)", EXIT_USAGE)
     repo, git, cfg = _context(args)
     with _connect(repo) as backend:
         commit, analysis, plan = vault.seal(git, repo, cfg, backend, ask=_asker())
@@ -618,6 +650,10 @@ def cmd_purge(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------- parser
 
 
+def _all_flag(p: argparse.ArgumentParser, text: str) -> None:
+    p.add_argument("--all", action="store_true", help=text)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nbp-git-safe", description=__doc__)
     parser.add_argument("--version", action="version", version=f"nbp-git-safe {__version__}")
@@ -658,11 +694,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("unlock", cmd_unlock, "run keyCommand and hand the key to the agent")
     p.add_argument("--ttl", help="agent lifetime, e.g. 8h, 30m (default 8h)")
     p.add_argument("--idle-timeout", dest="idle_timeout", help="lock after this much inactivity")
-    add("lock", cmd_lock, "stop the agent (the key is gone)")
-    add("status", cmd_status, "agent and vault status")
+    _all_flag(p, "unlock every registered repository (one keyCommand run per distinct command)")
+    p = add("lock", cmd_lock, "stop the agent (the key is gone)")
+    _all_flag(p, "lock every registered repository")
+    p = add("status", cmd_status, "agent and vault status")
+    _all_flag(p, "status of every registered repository")
     p = add("seal", cmd_seal, "seal protected files into the vault branch")
     p.add_argument("--on-missing", dest="on_missing", choices=["keep", "remove", "ask"])
     p.add_argument("--pad-bucket", dest="pad_bucket")
+    _all_flag(p, "seal every registered repository whose agent is unlocked (never unlocks)")
+    p.add_argument(
+        "--push",
+        action="store_true",
+        help="with --all: then push the vault branch (no force) where autoPush is set",
+    )
     p = add("open", cmd_open, "materialize vault files at their real paths")
     p.add_argument("--confirm-first-adopt", action="store_true", help=ADOPT_HELP)
     add("ls", cmd_ls, "list files in the vault")
@@ -714,9 +759,36 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("hook", cmd_hook, "run a hook handler (called by git, not by hand)")
     p.add_argument("event", choices=hooks.EVENTS)
     p.add_argument("hook_args", nargs=argparse.REMAINDER)
-    add("doctor", cmd_doctor, "check the setup and print actionable findings")
+    p = add("doctor", cmd_doctor, "check the setup and print actionable findings")
+    _all_flag(p, "check every registered repository")
     p = add("uninstall", cmd_uninstall, "remove our hooks and exclude block (vault untouched)")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    p = add(
+        "registry", fleetcli.cmd_registry, "the per-user list of repositories (for --all, tray)"
+    )
+    p.set_defaults(registry_command=None)
+    reg = p.add_subparsers(dest="registry_command")
+    reg.add_parser("list", help="show the registered repositories")
+    for name, text in (
+        ("add", "register a repository (default: the current one)"),
+        ("remove", "forget a repository (default: the current one)"),
+    ):
+        q = reg.add_parser(name, help=text)
+        q.add_argument("path", nargs="?", help="a path inside the repository")
+    reg.add_parser("prune", help="forget entries that are gone or are not git repositories")
+    p = add("autostart", fleetcli.cmd_autostart, "start the tray at login (Windows)")
+    p.set_defaults(autostart_command="status")
+    auto = p.add_subparsers(dest="autostart_command")
+    auto.add_parser("install", help="add the tray to your own startup (no administrator needed)")
+    auto.add_parser("remove", help="remove it again")
+    auto.add_parser("status", help="show whether it is installed")
+    p = add("tray", fleetcli.cmd_tray, "status icon in the notification area (Windows)")
+    p.add_argument(
+        "--config",
+        action="store_true",
+        help="show (or, with name=value arguments, change) the tray configuration and exit",
+    )
+    p.add_argument("settings", nargs="*", metavar="name=value")
     return parser
 
 

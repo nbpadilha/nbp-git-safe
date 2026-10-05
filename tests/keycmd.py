@@ -12,6 +12,10 @@ import time
 
 mode = sys.argv[1] if len(sys.argv) > 1 else "ok"
 key = os.environ.get("NBP_SAFE_TEST_KEY", "")
+invocations = os.environ.get("NBP_SAFE_TEST_KEY_LOG")
+if invocations:  # one line per run, the arguments only: never the key
+    with open(invocations, "a", encoding="ascii") as log:
+        log.write(" ".join(sys.argv[1:]) + "\n")
 
 if mode == "ok":
     sys.stdout.write(key + "\n")

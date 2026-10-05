@@ -43,6 +43,7 @@ def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=15,
+                **gitutil.window_flags(),
             )
     else:
         with contextlib.suppress(OSError, ProcessLookupError):
@@ -55,7 +56,7 @@ def run_key_command(argv: Sequence[str], timeout: float) -> bytes:
     """Run ``argv`` (no shell) and return the validated 64-byte master key."""
     if not argv:
         raise KeyCommandError("no keyCommand configured (git config nbp-safe.keyCommand)")
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = gitutil.window_flags()
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
     try:
@@ -112,11 +113,18 @@ def unlock(
     idle_timeout: float | None,
     key_timeout: float,
     spawn: Callable[[Path, float, float | None], agent.AgentInfo] = agent.spawn_agent,
+    key_source: Callable[[], bytes] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Unlock the repository. Returns ``(newly_unlocked, agent_status)``.
 
     Order matters for failing closed: the key command runs (and is validated) BEFORE any agent
-    process exists, so a failing command leaves nothing running."""
+    process exists, so a failing command leaves nothing running.
+
+    ``key_source`` lets a caller that already holds the validated 64-byte key (``unlock --all`` runs
+    one key command for several repositories that share it) supply it instead of running ``argv``
+    again. It is called only when this repository really needs a key, and what it returns goes the
+    same way as always: over the authenticated channel to an agent started here, never anywhere
+    else."""
     with agent.unlock_guard(state_dir):
         try:
             existing = current_status(state_dir)
@@ -130,7 +138,9 @@ def unlock(
         if existing is not None:  # a running agent that never received a key: replace it
             with contextlib.suppress(agent.AgentError), agent.AgentClient.connect(state_dir) as c:
                 c.lock()
-        master = run_key_command(argv or (), key_timeout)
+        master = (
+            key_source() if key_source is not None else run_key_command(argv or (), key_timeout)
+        )
         # always a NEW agent, started and authenticated by this process (never one found by file)
         status = agent.deliver_key(state_dir, master, ttl, idle_timeout, spawn)
         return True, status

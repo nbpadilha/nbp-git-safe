@@ -328,6 +328,22 @@ def private_dir(state_dir: Path | str, *, create: bool) -> Path | None:
     return rdir
 
 
+def private_root(*, create: bool) -> Path | None:
+    """The verified per-user base directory itself (where the registry of repositories and the
+    tray configuration live). Same rules as ``private_dir``: absent gives ``None`` unless
+    ``create``; anything that is not private to the user raises ``InsecureStateError``."""
+    root = runtime_root()
+    if not os.path.lexists(root):
+        if not create:
+            return None
+        root.parent.mkdir(parents=True, exist_ok=True)
+        _make_private(root)
+    problem = _dir_problem(root)
+    if problem:
+        raise InsecureStateError(f"the key agent's state directory is not private: {problem}")
+    return root
+
+
 def _default_posix_root() -> Path:
     return compute_runtime_root(
         sys.platform, {}, uid=os.geteuid(), home=_account_home() or Path.home()
@@ -397,6 +413,9 @@ def _retry_sharing(operation: Callable[[], Any]) -> Any:
             if time.monotonic() >= deadline:
                 raise
             time.sleep(SHARING_RETRY_STEP)
+
+
+retry_sharing = _retry_sharing  # public name for the other state files of this package
 
 
 def load_secret(rdir: Path, *, create: bool) -> bytes | None:
