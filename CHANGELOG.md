@@ -2,6 +2,29 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
+## Unreleased
+
+### Fixed
+
+- The package metadata said 0.1.0 while this changelog and the `v0.1.1` tag said 0.1.1:
+  `pyproject.toml`, `__version__`, `uv.lock`, README and SECURITY now say 0.1.1, and a test keeps
+  them equal.
+- `Index.from_dict` on something that is not a mapping raises `IndexValidationError` (it raised
+  `TypeError`); the agent client raises `ProtocolError` for an empty or non-JSON reply (it raised
+  `IndexError` / `ValueError`). Both found by the new fuzz tests; neither was reachable with a
+  well-behaved agent.
+
+### Added
+
+- Package: PyPI classifiers, keywords and project URLs; an explicit sdist file list (no internal
+  plan, no upstream test suite, no CI files, no lockfile); `scripts/check_package.py` and a CI job
+  `package` that builds the wheel and sdist, checks them and runs the entry points from a clean
+  environment.
+- Tests: fixed-seed fuzzing of the index validator, the blob and index decoders, the `.nbp-safe`
+  reading against `git check-ignore`, and the agent handshake and framing; the README quickstart and
+  every documented command are executed or parsed by a test; the purge test runs the commands the
+  tool prints and asserts reachability instead of file existence.
+
 ## 0.1.1 - 2026-10-03
 
 ### Fixed
