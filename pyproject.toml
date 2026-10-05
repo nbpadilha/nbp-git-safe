@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nbp-git-safe"
-version = "0.1.1"
+version = "0.2.0"
 description = "Encrypted, name-hiding vault for sensitive files inside a Git repository."
 readme = "README.md"
 license = "MIT"

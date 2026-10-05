@@ -2,22 +2,93 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
-## Unreleased
+## 0.2.0 - 2026-10-05
+
+Everything since 0.1.0: the POSIX fixes that were prepared as `0.1.1` (that version was never tagged
+or published), the multi-repository work and the Windows tray, and the fixes of the fifth adversarial
+review (below). Nothing was released between 0.1.0 and this version.
+
+### Security fixes from the fifth adversarial review (the `ci-tray` delta)
+
+Every finding below was reproduced and fixed with a regression test that fails on the previous
+commit. Two were rated medium.
+
+- **M1. `unlock --all` and the tray trusted an identical `keyCommand` argv to mean the same key.**
+  A command with a relative path (`["python", "tools/key.py"]`, `["sh", ".git/key.sh"]`) worked in
+  `unlock` (the working directory was the repository) but ran once, from the tray's folder, for a
+  whole group under `--all`, and a repository without a vault could then create its vault under the
+  key of ANOTHER repository, without an error. Now: every `keyCommand` runs from the root of the
+  repository it is for (`unlock`, hooks, `--all`, the tray); a relative argv makes each repository its
+  own group; and **each repository records the public id of its key** (`nbp-safe.keyId` in the local
+  `.git/config`, recorded by the first `unlock` run inside it or the first `seal`), which is checked
+  before a key is delivered (a running agent holding another key is replaced, never kept) and at every
+  seal, so the grouping is only an optimisation. A repository with neither a registered id nor a
+  vault is not handed a group's key. New `nbp-git-safe key-id [--accept <id>]` (typed confirmation)
+  for a deliberate change, printed by the `rotate` next steps; `doctor` reports a missing id, a relative
+  path in `keyCommand` and an agent holding another key. The statement in `THREAT_MODEL.md` that an
+  identical argv gives the same key "by construction" was false and is corrected.
+- **M2. A `git` that never answers froze the tray's queue.** `git push` (and `fetch`) had no time limit,
+  so one stuck `ssh` or a credential-manager window blocked refresh, deep checks and sealing. Now: a hard
+  limit (120 s in the background, 10 min for a push or sync you start) that kills the whole process
+  tree, not only `git`; a non-interactive environment for the background push (`GIT_TERMINAL_PROMPT=0`,
+  `GCM_INTERACTIVE=never`, and an `ssh` with `BatchMode`, `ConnectTimeout` and `ServerAlive*` only
+  when you set no ssh command of your own); the vault is pushed with `--no-follow-tags`; and in the tray
+  the push has its **own worker lane**, so a push that hangs never stops the icon, the state or the
+  warnings (`push-timeout`, a warning code and a discreet balloon).
+- B1. An exception in the tray's deep check left the icon green: the failure is now a code on the
+  repository and a red state (not a clean bill of health).
+- B2. With `onMissing=ask`, files deleted locally were counted as pending although no non-interactive
+  seal ever removes them, which made the tray flip red each cycle: they are no longer counted (the tray
+  and `--all` treat `ask` as `keep`).
+- B3. An access-denied single-instance mutex was treated as "already running" and the tray left in
+  silence: it is now told apart, reported (message box and log) and has its own exit code (4).
+- B4. An agent state directory that is not private was shown as "locked": `AgentClient.connect` now
+  raises `InsecureStateError`, shown as the error `insecure-state` (red) in `status --all`, `seal --all`
+  and the tray, with an actionable message.
+- B5. `open_handle` could operate on the repository ABOVE a registered folder whose `.git` was deleted:
+  git discovery is capped at the registered folder (`GIT_CEILING_DIRECTORIES`) and the top level is
+  compared with the registered path.
+- B6. A tray repository's configuration was re-read every ten minutes only: it is read again right
+  before every unlock and every push.
+- B7. `autostart install` registered `pythonw.exe` without looking at who can change it: it now refuses
+  an interpreter or folder that another account can write to (`--allow-writable` overrides), and
+  `autostart status` reports that, and a stored value whose program no longer exists.
+- B8. Documents that promised more than the code did: `doctor --all` printed the names of tracked
+  protected files (now counts and an instruction); `THREAT_MODEL.md` said a window message "can at most
+  redraw" (it can open the menu; UIPI separates integrity levels, not users: corrected, and the message
+  must carry the icon's id); "the tray holds no key" and "adds no new copy" contradicted the group key
+  held inside the tray (rewritten, and fixed: the tray now unlocks in a short-lived child process,
+  `unlock-batch`, so the key never enters it).
+- Informational: the file lock is now an operating-system lock (a stale-lock takeover could be made by
+  two contenders at once), `tray.json` is read and written under one lock, the failure remembered for a
+  key group no longer keeps a traceback (and the frames that held what a key command printed), a
+  hook-declined push is no longer reported as "run sync" (`push-refused`), the registry's message for a
+  mapped network drive says what it is, and the tray can hide folder names from balloons
+  (`notifications=minimal`; Windows keeps a history of notifications).
 
 ### Changed
 
 - `gitutil.hide_child_windows()` (used by the tray, which runs without a console) starts git and the
   key command with `CREATE_NO_WINDOW`; nothing changes for the command line.
+- `rotate` prints the new key's public id and the `key-id --accept` step.
 
 ### Fixed
 
-- The package metadata said 0.1.0 while this changelog and the `v0.1.1` tag said 0.1.1:
-  `pyproject.toml`, `__version__`, `uv.lock`, README and SECURITY now say 0.1.1, and a test keeps
-  them equal.
+- POSIX: the agent socket path exceeded `sun_path` (`AF_UNIX path too long`) under long state roots.
+  Sockets now live in a short, verified 0700 directory (`/tmp/nbp-<uid>`, or `<state root>/s` with
+  `NBP_SAFE_RUNTIME_DIR`), named `<12 hex>-<12 hex>.sock`, never more than 100 bytes; a root that is
+  too long gives a clear error. Squatting of that directory fails closed.
+- POSIX: the listener's backlog was 1, so a burst of clients (parallel hooks) could be refused
+  (`ECONNREFUSED`, seen on macOS); it is now 32.
+- POSIX: `pid_alive` no longer counts a zombie (exited, not yet reaped) as a running agent.
+- The package metadata said 0.1.0 while this changelog said 0.1.1: `pyproject.toml`, `__version__`,
+  `uv.lock`, README and SECURITY now say 0.2.0, and a test keeps them equal.
 - `Index.from_dict` on something that is not a mapping raises `IndexValidationError` (it raised
   `TypeError`); the agent client raises `ProtocolError` for an empty or non-JSON reply (it raised
   `IndexError` / `ValueError`). Both found by the new fuzz tests; neither was reachable with a
   well-behaved agent.
+- Tests: Windows SDDL alias (`LA`) normalised like the product does; short runtime roots on POSIX;
+  hooks inherit the test state root; macOS NFD/precomposition case.
 
 ### Added
 
@@ -53,20 +124,19 @@ All notable changes. The format follows "Keep a Changelog"; versions follow SemV
   reading against `git check-ignore`, and the agent handshake and framing; the README quickstart and
   every documented command are executed or parsed by a test; the purge test runs the commands the
   tool prints and asserts reachability instead of file existence.
-
-## 0.1.1 - 2026-10-03
-
-### Fixed
-
-- POSIX: the agent socket path exceeded `sun_path` (`AF_UNIX path too long`) under long state roots.
-  Sockets now live in a short, verified 0700 directory (`/tmp/nbp-<uid>`, or `<state root>/s` with
-  `NBP_SAFE_RUNTIME_DIR`), named `<12 hex>-<12 hex>.sock`, never more than 100 bytes; a root that is
-  too long gives a clear error. Squatting of that directory fails closed.
-- POSIX: the listener's backlog was 1, so a burst of clients (parallel hooks) could be refused
-  (`ECONNREFUSED`, seen on macOS); it is now 32.
-- POSIX: `pid_alive` no longer counts a zombie (exited, not yet reaped) as a running agent.
-- Tests: Windows SDDL alias (`LA`) normalised like the product does; short runtime roots on POSIX;
-  hooks inherit the test state root; macOS NFD/precomposition case.
+- **Registered key id** (`nbp-safe.keyId`, public, local config only) and `nbp-git-safe key-id
+  [--accept <id>]`; `Config.key_id`; `keyid.py` and `keypin.py`; doctor findings for a missing id, a
+  relative `keyCommand` path and an agent holding another key.
+- **`unlock-batch`** (internal) and `unlockchild.py`: the tray's unlock in a short-lived child process;
+  `TrayController(unlock_runner=...)`.
+- `notifications = "full" | "minimal"` in `tray.json`; `autostart install --allow-writable`;
+  `winsec.write_exposure`; `gitutil.kill_tree`, `GitTimeoutError`, `network_env`; a push lane in the
+  tray controller; `check_error` in the tray model.
+- Tests for every finding of the fifth review (each fails on the previous commit): the key-id and
+  working-directory rules with real repositories and a real child, a local socket that accepts and never
+  answers (the push is stopped and the connection closes), a stand-in `git` whose grandchild keeps the
+  pipes open, the push lane and the failed-deep-check state in the controller, a real `icacls` grant for
+  the autostart check, and the OS-level lock with a killed holder.
 
 ## 0.1.0 - 2026-10-03
 
