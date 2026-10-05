@@ -1126,12 +1126,13 @@ class AgentClient:
 
     @classmethod
     def connect(cls, state_dir: Path) -> AgentClient:
-        """Connect to the live agent of ``state_dir`` or raise ``AgentNotRunningError``."""
+        """Connect to the live agent of ``state_dir`` or raise ``AgentNotRunningError`` (or
+        ``InsecureStateError`` when the state directory itself cannot be trusted)."""
         gone = "key agent is not running (run `nbp-git-safe unlock`)"
         try:
             info = read_agent_info(state_dir)
-        except InsecureStateError as exc:
-            raise AgentNotRunningError(str(exc)) from None
+        except InsecureStateError:
+            raise  # a state directory that is not private is NOT "locked": it is an error
         except AgentError:
             remove_agent_info(state_dir)
             raise AgentNotRunningError("agent state was corrupted and has been removed") from None

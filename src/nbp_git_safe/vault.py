@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from nbp_git_safe import crypto, protect
+from nbp_git_safe import crypto, keyid, protect
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config
 from nbp_git_safe.gitutil import (
@@ -604,14 +604,20 @@ def seal(
     replaced history on purpose)."""
     read_verified(repo)  # a damaged record stops here, before anything is written
     protect.install_exclude_block(repo)
+    actual_key_id = backend.key_id().hex()
+    keyid.check(cfg.key_id, actual_key_id)  # the key of ANOTHER repository never seals this one
     state = load_vault(git, backend, cfg)
     if state.tip is not None:  # never build on a branch that went back (a child would launder it)
         ensure_not_behind(git, repo, cfg.vault_ref, state.tip, allow_replaced=allow_replaced)
     analysis = analyze(git, repo, cfg, backend, state, renames=renames, forget=forget)
     plan = plan_seal(repo, cfg, backend, analysis, now=now, ask=ask)
     if plan is None:
+        if cfg.key_id is None and state.tip is not None:
+            keyid.record(git, actual_key_id)  # the vault opened under this key: it is the key
         return None, analysis, None
     commit = commit_plan(git, repo, plan, cfg, now=now)
+    if cfg.key_id is None and (commit is not None or state.tip is not None):
+        keyid.record(git, actual_key_id)  # a new vault was created, or the old one opened, with it
     if commit is not None and _was_verified(repo, plan.ref, plan.parent):
         mark_verified(repo, plan.ref, commit, plan.new_index.seq)  # our own child of a good tip
     return commit, analysis, plan

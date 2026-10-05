@@ -9,14 +9,17 @@ controller never touches a window; when something changed on a worker thread it 
 
 Threads: ``tick`` and ``command`` return at once. The slow things (reading the agents of all
 repositories, the slower health check, sealing, pushing, and above all ``unlock``, which may wait
-up to two minutes for the password manager) run on two worker lanes: one serial lane for unlocking
-(one password-manager prompt at a time) and one for everything else. A failure in a job becomes an
-error code on the repository and a log line, never an exception in the front end.
+up to two minutes for the password manager, and a push to a remote that does not answer) run on
+three worker lanes: one serial lane for unlocking (one password-manager prompt at a time), one for
+pushing (a push that hangs delays only the next push: it has a hard time limit, and the icon, the
+state and the warnings never wait for it) and one for everything else. A failure in a job becomes
+an error code on the repository and a log line, never an exception in the front end.
 
-Keys: the controller holds none. The key passes through this process only inside
-``fleetops.unlock_all`` (as in ``nbp-git-safe unlock``) and goes straight to the agent of the
-repository; nothing here stores, logs or shows it. Every repository's own ``.git/config`` decides
-its ``keyCommand``.
+Keys: the controller holds none, and with the ``unlock_runner`` the Windows tray passes
+(``unlockchild.run_in_child``) the key never enters this long-lived process at all: it lives in a
+short-lived child that hands it to the agent and exits. (Without a runner, ``fleetops.unlock_all``
+runs in this process, as ``nbp-git-safe unlock`` does in its own.) Nothing here stores, logs or
+shows a key. Every repository's own ``.git/config`` decides its ``keyCommand``.
 """
 
 from __future__ import annotations
@@ -102,6 +105,8 @@ class TrayController:
         log: TrayLog | None = None,
         unlock_worker: Worker | None = None,
         work_worker: Worker | None = None,
+        push_worker: Worker | None = None,
+        unlock_runner: Callable[..., list[fleetops.Outcome]] | None = None,
         autostart_get: Callable[[], bool | None] = lambda: None,
         autostart_set: Callable[[bool], None] | None = None,
         open_folder: Callable[[Path], None] = lambda _p: None,
@@ -117,6 +122,8 @@ class TrayController:
         self._log = log or TrayLog(None)
         self._unlock_worker = unlock_worker or SerialWorker("nbp-unlock")
         self._work_worker = work_worker or SerialWorker("nbp-work")
+        self._push_worker = push_worker or SerialWorker("nbp-push")
+        self._unlock_runner = unlock_runner
         self._autostart_get = autostart_get
         self._autostart_set = autostart_set
         self._open_folder = open_folder
@@ -147,6 +154,8 @@ class TrayController:
         self._busy: dict[str, str] = {}
         self._errors: dict[str, str] = {}
         self._deep: dict[str, fleetops.DeepCheck] = {}
+        self._deep_failed: dict[str, str] = {}  # the health check itself could not run: code
+        self._pushing: set[str] = set()  # a push is queued or running (never queued twice)
         self._pending_since: dict[str, float] = {}
         self._notices: list[fleet.Notice] = []
         self._tracker = fleet.NoticeTracker()
@@ -312,7 +321,7 @@ class TrayController:
     def _unlock_job(self, handles: list[RepoHandle] | None, marked: list[str], why: str) -> None:
         try:
             if handles is None:
-                self._refresh(reopen=False)
+                self._refresh(reopen=True)  # every configuration is read again, right now
                 with self._lock:
                     handles = [self._handles[k] for k in self._order if k in self._handles]
                     for handle in handles:
@@ -321,8 +330,10 @@ class TrayController:
                             marked.append(handle.key)
             self._rebuild()
             by_key = {h.key: h for h in (handles or [])}
-            wanted = [by_key[k] for k in marked if k in by_key]
-            for outcome in self._ops.unlock_all(wanted, on_outcome=self._after_unlock):
+            fresh = (self._fresh(by_key[k], "unlock") for k in marked if k in by_key)
+            wanted = [h for h in fresh if h is not None]
+            runner = self._unlock_runner or self._ops.unlock_all
+            for outcome in runner(wanted, on_outcome=self._after_unlock):
                 self._log.write("unlock", outcome.index, code=outcome.code or outcome.kind)
         except Exception as exc:
             self.report("unlock", None, fleetops.classify(exc)[0])
@@ -332,6 +343,24 @@ class TrayController:
                     self._busy.pop(key, None)
             self._refresh_safely()
             self._changed()
+
+    def _fresh(self, handle: RepoHandle, what: str) -> RepoHandle | None:
+        """``handle`` with the repository's own configuration read again NOW: the periodic refresh
+        re-reads it only every few minutes, and a ``keyCommand`` changed a moment ago must apply
+        to the unlock or push about to run. ``None`` (and the error code on the repository) when
+        the repository can no longer be opened."""
+        try:
+            fresh: RepoHandle = self._ops.open_handle(str(handle.path), handle.index)
+        except Exception as exc:
+            code = exc.code if isinstance(exc, fleetops.HandleError) else fleetops.classify(exc)[0]
+            with self._lock:
+                self._errors[handle.key] = code
+            self.report(what, handle.index, code)
+            return None
+        with self._lock:
+            if fresh.key == handle.key and handle.key in self._handles:
+                self._handles[handle.key] = fresh
+        return fresh
 
     def _after_unlock(self, outcome: fleetops.Outcome) -> None:
         with self._lock:
@@ -355,11 +384,10 @@ class TrayController:
 
     def _work_job(self, handle: RepoHandle, action: str) -> None:
         try:
-            if action == "lock":
-                outcome = self._ops.lock_one(handle)
-            else:
-                outcome = self._ops.seal_one(handle, push=self._config.sealPush)
+            outcome = self._ops.lock_one(handle) if action == "lock" else self._ops.seal_one(handle)
             self._record(handle, action, outcome)
+            if action == "seal" and outcome.kind == OK:
+                self._queue_push(handle)
         except Exception as exc:
             self.report(action, handle.index, fleetops.classify(exc)[0])
         finally:
@@ -375,6 +403,32 @@ class TrayController:
             self.report("auto-unlock", handle.index, fleetops.classify(exc)[0])
         self._changed()
 
+    def _queue_push(self, handle: RepoHandle) -> None:
+        """After a seal, with ``sealPush``: push on the push lane, never on the seal's own."""
+        if not self._config.sealPush:
+            return
+        with self._lock:
+            if handle.key in self._pushing:
+                return
+            self._pushing.add(handle.key)
+        self._push_worker.submit(lambda: self._push_job(handle))
+
+    def _push_job(self, handle: RepoHandle) -> None:
+        try:
+            fresh = self._fresh(handle, "push")
+            if fresh is not None:
+                self._record(fresh, "push", self._ops.push_one(fresh))
+        except Exception as exc:
+            code = fleetops.classify(exc)[0]
+            with self._lock:
+                self._errors[handle.key] = code
+            self.report("push", handle.index, code)
+        finally:
+            with self._lock:
+                self._pushing.discard(handle.key)
+            self._rebuild()
+            self._changed()
+
     def _record(self, handle: RepoHandle, what: str, outcome: fleetops.Outcome) -> None:
         self._log.write(
             what,
@@ -382,11 +436,18 @@ class TrayController:
             code=outcome.code or outcome.kind,
             sealed=int(outcome.data.get("sealed", 0)),
         )
+        if what == "push":  # its own code never clears (or is cleared by) a seal's
+            with self._lock:
+                if outcome.kind in (FAILED, WARN):
+                    self._errors[handle.key] = outcome.code or "failed"
+                elif outcome.kind == OK and self._errors.get(handle.key, "").startswith("push-"):
+                    self._errors.pop(handle.key, None)
+            return
         with self._lock:
             if outcome.kind in (FAILED, WARN):
                 self._errors[handle.key] = outcome.code or "failed"
-            elif outcome.kind == OK:
-                self._errors.pop(handle.key, None)
+            elif outcome.kind == OK and not self._errors.get(handle.key, "").startswith("push-"):
+                self._errors.pop(handle.key, None)  # (a push problem is cleared by a push)
             if what == "seal" and outcome.kind in (OK, WARN):
                 self._pending_since.pop(handle.key, None)
                 if handle.key in self._deep:
@@ -404,9 +465,11 @@ class TrayController:
                 continue
             self._rebuild()
             try:
-                outcome = self._ops.seal_one(handle, push=self._config.sealPush)
+                outcome = self._ops.seal_one(handle)
                 if outcome.kind != SKIPPED:
                     self._record(handle, "seal", outcome)
+                if outcome.kind == OK:
+                    self._queue_push(handle)
             except Exception as exc:
                 self.report("seal", handle.index, fleetops.classify(exc)[0])
             finally:
@@ -491,6 +554,7 @@ class TrayController:
             self._busy = {k: v for k, v in self._busy.items() if k in live}
             self._errors = {k: v for k, v in self._errors.items() if k in live}
             self._deep = {k: v for k, v in self._deep.items() if k in live}
+            self._deep_failed = {k: v for k, v in self._deep_failed.items() if k in live}
             self._pending_since = {k: v for k, v in self._pending_since.items() if k in live}
 
     def _refresh(self, *, reopen: bool) -> None:
@@ -562,6 +626,7 @@ class TrayController:
                         pending_since=since,
                         busy=busy,
                         error=error,
+                        check_error=self._deep_failed.get(key, ""),
                     )
                 )
             self._states = tuple(states)
@@ -570,6 +635,7 @@ class TrayController:
                 now,
                 warn_expiry_minutes=self._config.warnExpiryMinutes,
                 warn_pending_minutes=self._config.warnPendingMinutes,
+                minimal=self._config.notifications == "minimal",
             )
             self._notices.extend(notices)
 
@@ -582,8 +648,13 @@ class TrayController:
             except Exception as exc:
                 code = fleetops.classify(exc)[0]
                 self.report("deep", handle.index, code)
+                with self._lock:  # a check that cannot run is not a clean bill of health
+                    self._deep_failed[handle.key] = code
+                    self._errors[handle.key] = code
                 continue
             with self._lock:
+                if self._deep_failed.pop(handle.key, None) is not None:
+                    self._errors.pop(handle.key, None)
                 self._deep[handle.key] = result
             self._log.write(
                 "deep",

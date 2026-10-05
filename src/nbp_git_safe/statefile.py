@@ -4,6 +4,10 @@ replacement, a cross-process lock and a read that follows no link.
 
 These files live in the verified private base directory of the agent state (``agent.private_root``).
 They never hold keys, plaintext or the name of a protected file.
+
+The writer lock is an operating-system lock on an (empty) lock file, not the existence of the file:
+the system releases it when its holder dies, so there is no "stale lock" to guess about (a guess two
+contenders could make at the same moment, both taking the lock) and nothing to delete.
 """
 
 from __future__ import annotations
@@ -19,7 +23,6 @@ from pathlib import Path
 from nbp_git_safe import agent, plainfile
 
 LOCK_WAIT = 15.0  # seconds a writer waits for another writer
-LOCK_STALE = 120.0  # a lock file older than this belongs to a dead process
 LOCK_STEP = 0.01
 _BINARY = getattr(os, "O_BINARY", 0)
 
@@ -68,28 +71,51 @@ def atomic_write(path: Path, data: bytes) -> None:
                 os.close(dir_fd)
 
 
-@contextlib.contextmanager
-def file_lock(path: Path, *, wait: float = LOCK_WAIT, stale: float = LOCK_STALE) -> Iterator[None]:
-    """Exclusive lock by an exclusively created file. Contenders retry for ``wait`` seconds; a lock
-    older than ``stale`` seconds is taken over (its owner died)."""
-    deadline = time.monotonic() + wait
-    while True:
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY, 0o600)
-        except (FileExistsError, PermissionError):
-            # PermissionError: Windows reports a lock file that is being deleted this way
-            with contextlib.suppress(OSError):
-                if time.time() - path.stat().st_mtime > stale:
-                    path.unlink()
-                    continue
-            if time.monotonic() >= deadline:
-                raise StateFileError("another process is writing this file; try again") from None
-            time.sleep(LOCK_STEP)
-            continue
-        os.close(fd)
-        break
+def _try_lock(fd: int) -> bool:
+    """Take the exclusive lock on the lock file without waiting (``False``: someone holds it)."""
     try:
-        yield
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+    # POSIX: ``flock`` is released by closing the descriptor
+
+
+@contextlib.contextmanager
+def file_lock(path: Path, *, wait: float = LOCK_WAIT) -> Iterator[None]:
+    """Exclusive lock: an operating-system lock on ``path`` (created empty, private, and left in
+    place: deleting it would race with the next holder). Contenders retry for ``wait`` seconds. The
+    system drops the lock if its holder dies, so a crashed writer never blocks the next one."""
+    deadline = time.monotonic() + wait
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | _BINARY, 0o600)
+    except OSError as exc:
+        raise StateFileError(f"cannot open the lock file ({exc.strerror or 'I/O error'})") from exc
+    try:
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise StateFileError("another process is writing this file; try again")
+            time.sleep(LOCK_STEP)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                _unlock(fd)
     finally:
-        with contextlib.suppress(OSError):
-            path.unlink()
+        os.close(fd)

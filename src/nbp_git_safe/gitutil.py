@@ -7,13 +7,16 @@ configured or invoked by this tool; blobs are written with ``--no-filters``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 STATE_DIRNAME = "nbp-safe"
 
@@ -201,6 +204,97 @@ class GitError(Exception):
     """A git invocation failed (message carries git's own stderr, never file contents)."""
 
 
+class GitTimeoutError(GitError):
+    """A git invocation did not finish within its time limit and was stopped (with its children)."""
+
+
+def _taskkill() -> str:
+    root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    return str(Path(root) / "System32" / "taskkill.exe")
+
+
+def kill_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Stop ``proc`` AND everything it started (an ``ssh`` or a credential helper holding the pipes
+    open would otherwise keep a ``communicate`` waiting after the parent was killed). On POSIX the
+    child must have been started with ``start_new_session=True``."""
+    if sys.platform == "win32":
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(  # noqa: S603
+                [_taskkill(), "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+                **window_flags(),
+            )
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def _execute(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    input: bytes | None,
+    timeout: float | None,
+) -> tuple[int, bytes, bytes]:
+    """Run ``git <args>`` and return ``(exit code, stdout, stderr)``. Without ``timeout`` this is a
+    plain ``subprocess.run``. With one the process is started in its own group and, when the time
+    is up, the WHOLE tree is killed (``GitTimeoutError``): ``subprocess.run(timeout=...)`` kills
+    only the direct child and then waits for pipes that a grandchild still holds."""
+    argv = [git_executable(), *args]
+    if timeout is None:
+        done = subprocess.run(  # noqa: S603 - argv list, no shell
+            argv,
+            cwd=cwd,
+            env=child_env(env),
+            input=input,
+            capture_output=True,
+            check=False,
+            **window_flags(),
+        )
+        return done.returncode, done.stdout, done.stderr
+    kwargs: dict[str, Any] = dict(window_flags())
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    child = subprocess.Popen(  # noqa: S603 - argv list, no shell
+        argv,
+        cwd=cwd,
+        env=child_env(env),
+        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **kwargs,
+    )
+    try:
+        out, err = child.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(child)
+        with contextlib.suppress(Exception):
+            child.communicate(timeout=5)
+        raise GitTimeoutError(
+            f"git {args[0] if args else ''} did not finish within {timeout:g} s and was stopped"
+        ) from None
+    except BaseException:
+        kill_tree(child)
+        raise
+    return child.returncode, out, err
+
+
+# What a git that talks to a remote from a BACKGROUND process (the tray, ``seal --all --push``)
+# runs on: nothing may wait for a person. ``ConnectTimeout`` and ``ServerAlive*`` make a dead
+# ``ssh`` give up by itself; the hard limit of ``_execute`` is the backstop.
+SSH_NONINTERACTIVE = (
+    "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+)
+PUSH_TIMEOUT = 120.0  # seconds, for the background push
+FOREGROUND_TIMEOUT = 600.0  # seconds, for a push or fetch a person started and may be watching
+
+
 @dataclass(frozen=True)
 class Repo:
     """Resolved locations of a repository (worktree-aware)."""
@@ -228,23 +322,16 @@ class Git:
         input: bytes | None = None,
         extra_env: Mapping[str, str] | None = None,
         check: bool = True,
+        timeout: float | None = None,
     ) -> bytes:
         env = self.env
         if extra_env:
             env = {**env, **extra_env}
-        proc = subprocess.run(  # noqa: S603 - argv list, no shell
-            [git_executable(), *args],
-            cwd=self.cwd,
-            env=child_env(env),
-            input=input,
-            capture_output=True,
-            check=False,
-            **window_flags(),
-        )
-        if check and proc.returncode != 0:
-            detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-            raise GitError(f"git {args[0]} failed ({proc.returncode}): {' '.join(detail[:3])}")
-        return proc.stdout
+        code, out, err = _execute(args, cwd=self.cwd, env=env, input=input, timeout=timeout)
+        if check and code != 0:
+            detail = err.decode("utf-8", "replace").strip().splitlines()
+            raise GitError(f"git {args[0]} failed ({code}): {' '.join(detail[:3])}")
+        return out
 
     def text(self, *args: str, **kwargs: object) -> str:
         return self.run(*args, **kwargs).decode("utf-8", "surrogateescape")  # type: ignore[arg-type]
@@ -254,19 +341,12 @@ class Git:
         *args: str,
         input: bytes | None = None,
         extra_env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> tuple[int, bytes, bytes]:
-        """Run git and return ``(exit code, stdout, stderr)`` without raising."""
+        """Run git and return ``(exit code, stdout, stderr)`` without raising (a ``timeout`` that
+        runs out raises ``GitTimeoutError`` after the whole process tree was killed)."""
         env = {**self.env, **extra_env} if extra_env else self.env
-        proc = subprocess.run(  # noqa: S603 - argv list, no shell
-            [git_executable(), *args],
-            cwd=self.cwd,
-            env=child_env(env),
-            input=input,
-            capture_output=True,
-            check=False,
-            **window_flags(),
-        )
-        return proc.returncode, proc.stdout, proc.stderr
+        return _execute(args, cwd=self.cwd, env=env, input=input, timeout=timeout)
 
     def clean(self, cwd: Path | str) -> Git:
         """A ``Git`` for another directory (a scratch repository) with a clean environment."""
@@ -274,16 +354,32 @@ class Git:
 
     def try_run(self, *args: str, input: bytes | None = None) -> bytes | None:
         """Return stdout, or ``None`` when git exits non-zero."""
-        proc = subprocess.run(  # noqa: S603
-            [git_executable(), *args],
-            cwd=self.cwd,
-            env=child_env(self.env),
-            input=input,
-            capture_output=True,
-            check=False,
-            **window_flags(),
-        )
-        return proc.stdout if proc.returncode == 0 else None
+        code, out, _err = _execute(args, cwd=self.cwd, env=self.env, input=input, timeout=None)
+        return out if code == 0 else None
+
+
+def ssh_is_user_defined(git: Git) -> bool:
+    """Did the user choose how git runs ssh (``GIT_SSH_COMMAND``, ``GIT_SSH`` or
+    ``core.sshCommand``)? That choice is never overridden."""
+    if git.env.get("GIT_SSH_COMMAND") or git.env.get("GIT_SSH"):
+        return True
+    configured = git.try_run("config", "--get", "core.sshCommand")
+    return bool(configured and configured.strip())
+
+
+def network_env(env: Mapping[str, str], *, ssh_default: bool = True) -> dict[str, str]:
+    """``env`` for a git process that reaches a remote without anyone watching: no terminal prompt
+    (``GIT_TERMINAL_PROMPT=0``), no Git Credential Manager window (``GCM_INTERACTIVE=never``), slow
+    HTTP transfers abandoned, and (``ssh_default``: the user chose no ssh command) an ``ssh`` that
+    never asks and gives up on a dead connection."""
+    merged = dict(env)
+    merged["GIT_TERMINAL_PROMPT"] = "0"
+    merged["GCM_INTERACTIVE"] = "never"
+    merged.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+    merged.setdefault("GIT_HTTP_LOW_SPEED_TIME", "60")
+    if ssh_default:
+        merged["GIT_SSH_COMMAND"] = SSH_NONINTERACTIVE
+    return merged
 
 
 def discover(cwd: Path | str, env: Mapping[str, str] | None = None) -> tuple[Repo, Git]:

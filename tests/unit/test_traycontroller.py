@@ -58,6 +58,9 @@ class FakeOps:
     unlock_outcome: str = "ok"
     seal_kind: str = "ok"
     seal_code: str = "sealed"
+    push_kind: str = "ok"
+    push_code: str = "pushed"
+    seen_cfgs: list[tuple[str, Config]] = field(default_factory=list)  # (what, cfg) at call time
     boom: set[str] = field(default_factory=set)
     clock: Clock = field(default_factory=Clock)
     ttl: float = 8 * 3600
@@ -82,6 +85,7 @@ class FakeOps:
         self, handles: Sequence[RepoHandle], on_outcome: Callable[[Outcome], None] | None = None
     ) -> list[Outcome]:
         self.calls.append(("unlock", tuple(h.name for h in handles)))
+        self.seen_cfgs += [("unlock", h.cfg) for h in handles]
         if "unlock" in self.boom:
             raise RuntimeError("secret detail that must not be logged")
         out = []
@@ -108,6 +112,13 @@ class FakeOps:
         return Outcome(
             handle.index, handle.name, self.seal_kind, "m", self.seal_code, {"sealed": 2}
         )
+
+    def push_one(self, handle: RepoHandle) -> Outcome:
+        self.calls.append(("push", handle.name))
+        self.seen_cfgs.append(("push", handle.cfg))
+        if "push" in self.boom:
+            raise RuntimeError("secret detail that must not be logged")
+        return Outcome(handle.index, handle.name, self.push_kind, "m", self.push_code)
 
     def deep_check(self, handle: RepoHandle) -> DeepCheck:
         self.calls.append(("deep", handle.name))
@@ -146,6 +157,7 @@ class Rig:
         self.log_path = tmp_path / "tray.log"
         self.unlock_worker: Any = InlineWorker()
         self.work_worker: Any = InlineWorker()
+        self.push_worker: Any = InlineWorker()
         self.build()
 
     def build(self) -> TrayController:
@@ -168,6 +180,7 @@ class Rig:
             log=TrayLog(self.log_path),
             unlock_worker=self.unlock_worker,
             work_worker=self.work_worker,
+            push_worker=self.push_worker,
             autostart_get=lambda: self.autostart_state,
             autostart_set=self._set_autostart,
             open_folder=self.opened.append,
@@ -305,7 +318,8 @@ def test_seal_interval_and_push_come_from_the_configuration(tmp_path: Path) -> N
     rig.tick(4 * 60 + 59)
     assert rig.ops.count("seal") == 0
     rig.tick(1)
-    assert ("seal", "a", True) in rig.ops.calls
+    # the seal itself never pushes: the push is its own job, on its own lane
+    assert ("seal", "a", False) in rig.ops.calls and ("push", "a") in rig.ops.calls
 
 
 def test_seal_failure_is_recorded_and_notified_once(tmp_path: Path) -> None:
@@ -327,7 +341,7 @@ def test_a_push_that_could_not_reach_origin_is_a_warning_code_not_a_failure(tmp_
     rig = Rig(tmp_path, "a", config=trayconfig.TrayConfig(sealPush=True))
     rig.tick()
     rig.cmd("unlock", 0)
-    rig.ops.seal_kind, rig.ops.seal_code = "warn", "push-offline"
+    rig.ops.push_kind, rig.ops.push_code = "warn", "push-offline"
     rig.tick(15 * 60)
     assert rig.states()["a"].error == "push-offline"
     assert rig.color() == Color.GREEN  # offline is not a red condition

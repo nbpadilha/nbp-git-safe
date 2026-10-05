@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nbp_git_safe import agent, crypto, guard, multi, protect, unlock, vault
+from nbp_git_safe import agent, crypto, guard, keyid, multi, protect, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config, ConfigError, load_config
 from nbp_git_safe.gitutil import Git, GitError, Repo, discover, rev_parse
@@ -320,8 +320,10 @@ def acquire_backend(repo: Repo, cfg: Config) -> tuple[agent.AgentClient | None, 
                     ttl=cfg.ttl,
                     idle_timeout=cfg.idle_timeout,
                     key_timeout=cfg.key_command_timeout,
+                    cwd=repo.toplevel,
+                    expected_key_id=cfg.key_id,
                 )
-            except (unlock.KeyCommandError, agent.AgentError, OSError) as exc:
+            except (unlock.KeyCommandError, keyid.KeyIdError, agent.AgentError, OSError) as exc:
                 return None, f"autoUnlock failed: {exc}"
             continue
         break

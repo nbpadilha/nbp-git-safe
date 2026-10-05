@@ -148,6 +148,12 @@ class NbpRepo:
         assert_no_leaks(hits)
 
 
+def key_id_of(master: bytes) -> str:
+    """The public key id (16 hex digits) the tool registers for a repository, computed from the
+    crypto layer so that it does not depend on the code that registers it."""
+    return crypto.KeySet(master).key_id.hex()
+
+
 def new_canaries() -> list[str]:
     return make_canaries(4)
 

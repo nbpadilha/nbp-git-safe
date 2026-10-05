@@ -15,6 +15,7 @@ import pytest
 from nbp_git_safe import crypto, multi, vault
 from nbp_git_safe.config import load_config
 from nbp_git_safe.gitutil import discover
+from tests import helpers
 from tests.helpers import NbpRepo, ThreadAgent
 from tests.integration.conftest import Env
 from tests.integration.guardkit import commit, first_protected, remote_refs
@@ -112,6 +113,14 @@ def test_rotated_vault_is_usable_after_switching_key_and_ref(hooked: Env) -> Non
     try:
         status = repo.cli("status")
         assert status.code == 0 and f"vault: {ref}" in status.out
+        # the key changed ON PURPOSE: until the owner says so (the documented next step, which
+        # names the new key's public id) the registered id of the old key refuses the new one
+        new_id = helpers.key_id_of(new_master)
+        assert f"key-id --accept {new_id}" in result.err
+        refused = repo.raw("push", "-q", "origin", f"nbp-safe-{YEAR}")
+        assert refused.returncode != 0 and f"key-id --accept {new_id}" in refused.stderr
+        accepted = repo.cli("key-id", "--accept", new_id, "--confirm", f"accept key id {new_id}")
+        assert accepted.code == 0, accepted.err
         pushed = repo.raw("push", "-q", "origin", f"nbp-safe-{YEAR}")
         assert pushed.returncode == 0, pushed.stderr
         assert remote_refs(hooked)[ref] == repo.sh("rev-parse", ref).strip()

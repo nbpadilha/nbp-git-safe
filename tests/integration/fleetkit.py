@@ -31,14 +31,19 @@ def runs(log: Path) -> list[str]:
     return log.read_text(encoding="ascii").splitlines() if log.exists() else []
 
 
-def repo_named(make_repo: MakeRepo, name: str, *extra: str, mode: str = "ok") -> NbpRepo:
+def repo_named(
+    make_repo: MakeRepo, name: str, *extra: str, mode: str = "ok", key_id: bool = True
+) -> NbpRepo:
     """A repository whose keyCommand is the test command with ``extra`` arguments (so repositories
-    with the same ``extra`` share an identical argv)."""
+    with the same ``extra`` share an identical argv). By default its key id is registered, as the
+    first ``unlock`` or ``seal`` inside a real repository does (``key_id=False``: a fresh one)."""
     repo = make_repo(name)
     assert isinstance(repo, NbpRepo)
     repo.set_config(
         "nbp-safe.keyCommand", json.dumps([sys.executable, str(helpers.KEYCMD), mode, *extra])
     )
+    if key_id:
+        repo.set_config("nbp-safe.keyId", helpers.key_id_of(repo.master))
     registry.add(repo.path)
     return repo
 

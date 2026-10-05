@@ -52,6 +52,7 @@ class RepoState:
     pending_since: float | None = None
     busy: str = ""  # an operation in progress ("unlocking", "sealing", ...)
     error: str = ""  # short code of the last failed operation ("" when none)
+    check_error: str = ""  # short code when the slower health check itself could not run
 
     def remaining(self, now: float) -> float | None:
         if self.status != UNLOCKED or self.expires_at is None:
@@ -68,10 +69,12 @@ def pending_too_long(state: RepoState, now: float, grace: float) -> bool:
 
 
 def needs_attention(state: RepoState, now: float, grace: float = DEFAULT_PENDING_GRACE) -> bool:
-    """The red conditions: a broken repository, a doctor problem, a divergent vault, or protected
-    files that stayed unsealed for longer than ``grace`` seconds."""
+    """The red conditions: a broken repository, a doctor problem, a health check that could not
+    run (not a clean bill of health), a divergent vault, or protected files that stayed unsealed
+    for longer than ``grace`` seconds."""
     return (
         state.status == ERROR
+        or bool(state.check_error)
         or bool(state.problems)
         or state.divergent
         or pending_too_long(state, now, grace)
@@ -395,9 +398,15 @@ class NoticeTracker:
         *,
         warn_expiry_minutes: int,
         warn_pending_minutes: int,
+        minimal: bool = False,
     ) -> list[Notice]:
+        """``minimal``: a balloon says ``repository 3`` (its position in the registry) instead of
+        the folder's name; Windows keeps a history of notifications, and a folder name can be
+        enough to say what a person works on."""
         notices: list[Notice] = []
         names = dict(zip((s.key for s in states), display_names(states), strict=True))
+        if minimal:
+            names = {s.key: f"repository {s.index}" for s in states}
         live = set(names)
         for state in states:
             name = names[state.key]
@@ -436,7 +445,11 @@ class NoticeTracker:
                 )
             if state.error and self._errors.get(state.key) != state.error:
                 self._errors[state.key] = state.error
-                notices.append(Notice("Operation failed", f"{name}: {state.error}", "error"))
+                if state.error.startswith("push-"):  # an unreachable origin: discreet, no alarm
+                    title, level = "Push did not complete", "warning"
+                else:
+                    title, level = "Operation failed", "error"
+                notices.append(Notice(title, f"{name}: {state.error}", level))
             elif not state.error:
                 self._errors.pop(state.key, None)
         # forget repositories that left the registry (keys never accumulate)

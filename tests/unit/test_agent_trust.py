@@ -294,9 +294,12 @@ def test_a_state_directory_others_can_write_is_refused_and_left_alone(tmp_path: 
     make_loose(rdir)  # ... in a directory somebody else can now write to
     with pytest.raises(agent.InsecureStateError, match="not private"):
         agent.read_agent_info(state)
-    with pytest.raises(agent.AgentNotRunningError, match="not private"):
+    # an untrusted state directory is an ERROR, not "locked" (review finding B4: it used to be
+    # converted into AgentNotRunningError, which every front end shows as a plain locked agent)
+    with pytest.raises(agent.InsecureStateError, match="not private"):
         agent.AgentClient.connect(state)
-    assert unlock.current_status(state) is None
+    with pytest.raises(agent.InsecureStateError, match="not private"):
+        unlock.current_status(state)
     assert agent.cleanup_orphan(state) is False
     agent.remove_agent_info(state)
     assert (rdir / agent.AGENT_JSON).exists()  # nothing was deleted from it

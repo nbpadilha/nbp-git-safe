@@ -31,6 +31,7 @@ from nbp_git_safe import crypto, protect, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config, is_vault_ref
 from nbp_git_safe.gitutil import (
+    FOREGROUND_TIMEOUT,
     Git,
     Repo,
     hash_object,
@@ -61,6 +62,11 @@ class RemoteRewriteError(vault.VaultError):
 
 class PushRejectedError(vault.VaultError):
     """The remote has vault commits this clone does not have."""
+
+
+class PushRefusedError(vault.VaultError):
+    """The remote declined the push by a rule of its own (a server-side hook, a protected branch):
+    ``sync`` does not help, someone has to look at the remote."""
 
 
 class ConfirmationError(vault.VaultError):
@@ -374,11 +380,15 @@ class SyncResult:
     known_macs: dict[str, frozenset[str]] = field(default_factory=dict)  # for vault.open_vault
 
 
-def fetch_vault(git: Git, cfg: Config, remote: str = REMOTE) -> bool:
+def fetch_vault(
+    git: Git, cfg: Config, remote: str = REMOTE, *, timeout: float = FOREGROUND_TIMEOUT
+) -> bool:
     """Fetch the vault branch into its remote-tracking ref (force-updating a tracking ref is only
-    a cache update; rollbacks are detected from the remembered tips). False: no such branch."""
+    a cache update; rollbacks are detected from the remembered tips). False: no such branch. A
+    fetch that does not finish within ``timeout`` is stopped with everything it started
+    (``GitTimeoutError``)."""
     code, _, err = git.run_status(
-        "fetch", "--quiet", remote, f"+{cfg.vault_ref}:{cfg.remote_vault_ref}"
+        "fetch", "--quiet", remote, f"+{cfg.vault_ref}:{cfg.remote_vault_ref}", timeout=timeout
     )
     if code == 0:
         return True
@@ -630,15 +640,38 @@ def sync(
 # ------------------------------------------------------------------------------- push
 
 
-def push_vault(git: Git, repo: Repo, cfg: Config, remote: str = REMOTE) -> str:
-    """``git push <remote> <vault ref>:<vault ref>`` without ``+``. Returns the pushed tip."""
+# git's own wording: a push the remote REFUSES because it has commits we do not ("! [rejected]
+# ... (non-fast-forward)" or "(fetch first)") is not the same thing as one a server-side hook or
+# rule declines ("! [remote rejected] ... (pre-receive hook declined)"): `sync` fixes the first only
+_BEHIND_RE = re.compile(r"\[rejected\]|non-fast-forward|fetch first|stale info")
+
+
+def push_vault(
+    git: Git, repo: Repo, cfg: Config, remote: str = REMOTE, *, timeout: float = FOREGROUND_TIMEOUT
+) -> str:
+    """``git push <remote> <vault ref>:<vault ref>`` without ``+`` (and without ``--follow-tags``:
+    the history carries upstream tags that must never travel). Returns the pushed tip. A push that
+    does not finish within ``timeout`` is stopped with everything it started
+    (``GitTimeoutError``)."""
     local = rev_parse(git, cfg.vault_ref + "^{commit}")
     if local is None:
         raise vault.VaultError("there is no local vault branch to push")
-    code, _, err = git.run_status("push", "--quiet", remote, f"{cfg.vault_ref}:{cfg.vault_ref}")
+    code, _, err = git.run_status(
+        "push",
+        "--quiet",
+        "--no-follow-tags",
+        remote,
+        f"{cfg.vault_ref}:{cfg.vault_ref}",
+        timeout=timeout,
+    )
     if code != 0:
         text = err.decode("utf-8", "replace")
-        if re.search(r"rejected|non-fast-forward|fetch first|stale info", text):
+        if "[remote rejected]" in text:
+            raise PushRefusedError(
+                "origin refused the push by a rule of its own (a server-side hook or a protected "
+                "branch); syncing will not change that: look at the remote's rules"
+            )
+        if _BEHIND_RE.search(text):
             raise PushRejectedError(
                 "origin has vault commits this clone does not have; run `nbp-git-safe sync`, "
                 "then push again (the tool never forces)"

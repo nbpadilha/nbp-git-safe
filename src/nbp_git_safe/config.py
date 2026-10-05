@@ -123,6 +123,13 @@ def parse_key_command(text: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_key_id(text: str) -> str:
+    value = text.strip().lower()
+    if re.match(r"^[0-9a-f]{16}$", value) is None:
+        raise ConfigError("keyId: expected 16 hexadecimal digits (see `nbp-git-safe key-id`)")
+    return value
+
+
 def _parse_timeout(text: str) -> float:
     try:
         value = float(text)
@@ -145,6 +152,7 @@ _PARSERS: dict[str, Callable[[str], Any]] = {
     "autopush": lambda t: _parse_bool(t, "autoPush"),
     "keycommandtimeout": _parse_timeout,
     "keycommand": parse_key_command,
+    "keyid": _parse_key_id,
 }
 
 # ``.nbp-safe.config`` (versioned): harmless options only, as git-config keys.
@@ -164,12 +172,13 @@ _VERSIONED_FLOORS = {
     "timegranularity": MIN_VERSIONED_GRANULARITY,
 }
 _ENV_PREFIX = "NBP_SAFE_"
-_LOCAL_ONLY = {"keycommand"}
+_LOCAL_ONLY = {"keycommand", "keyid"}
 
 
 @dataclass(frozen=True)
 class Config:
     key_command: tuple[str, ...] | None = field(default=None, repr=False)
+    key_id: str | None = None  # public fingerprint of the repository's key (local config only)
     ttl: int = DEFAULT_TTL
     idle_timeout: int | None = None
     on_missing: str = "keep"
@@ -259,6 +268,7 @@ def load_config(
                 break
     return Config(
         key_command=values.get("keycommand"),
+        key_id=values.get("keyid"),
         ttl=values.get("ttl", DEFAULT_TTL),
         idle_timeout=values.get("idletimeout"),
         on_missing=values.get("onmissing", "keep"),

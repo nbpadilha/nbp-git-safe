@@ -9,16 +9,23 @@ from pathlib import Path
 
 import pytest
 
-from nbp_git_safe import agent, crypto, fleetops, unlock, vault
+from nbp_git_safe import agent, crypto, fleetops, keyid, unlock, vault
 from nbp_git_safe import index as index_mod
 from nbp_git_safe.config import Config, ConfigError
 from nbp_git_safe.fleetops import GroupKey, RepoHandle
-from nbp_git_safe.gitutil import GitError
+from nbp_git_safe.gitutil import GitError, GitTimeoutError
 
 CASES = [
     (unlock.KeyCommandError("keyCommand failed (exit code 1)"), "key-command"),
     (agent.ProcessInspectionError("x"), "other-elevation"),
     (agent.HandshakeError("x"), "agent-auth"),
+    (
+        agent.InsecureStateError("the key agent's state directory is not private: x"),
+        "insecure-state",
+    ),
+    (keyid.KeyIdMismatchError("x"), "key-id-mismatch"),
+    (keyid.KeyIdMissingError("x"), "no-key-id"),
+    (GitTimeoutError("git push did not finish within 120 s"), "git-timeout"),
     (agent.AgentNotRunningError("x"), "locked"),
     (agent.AgentLockedError("x"), "locked"),
     (agent.AgentExpiredError("x"), "locked"),
@@ -126,11 +133,19 @@ def test_unlock_all_uses_the_injected_runner_once_per_group(tmp_path: Path) -> N
     seen: list[tuple[str, ...]] = []
 
     trees: list[list[object]] = []
+    places: list[object] = []
 
-    def runner(argv: tuple[str, ...], timeout: float, *, avoid: list[object]) -> bytes:
+    def runner(argv: tuple[str, ...], timeout: float, *, avoid: list[object], cwd: object) -> bytes:
         seen.append(tuple(argv))
         trees.append(list(avoid))  # the repositories of the group must not provide the program
+        places.append(cwd)  # and the command always runs from a repository root, never "here"
         return bytes(64)
+
+    class HasVault:
+        """A git that finds a vault branch: the repository can be unlocked from a group's key."""
+
+        def try_run(self, *_args: str, **_kw: object) -> bytes:
+            return b"a" * 40
 
     handles = [
         RepoHandle(
@@ -138,7 +153,7 @@ def test_unlock_all_uses_the_injected_runner_once_per_group(tmp_path: Path) -> N
             tmp_path / f"r{i}",
             f"r{i}",
             type("R", (), {"state_dir": tmp_path / f"state{i}", "toplevel": tmp_path / f"r{i}"})(),  # type: ignore[arg-type]
-            None,  # type: ignore[arg-type]
+            HasVault(),  # type: ignore[arg-type]
             Config(key_command=("k", "1" if i < 3 else "2")),
             f"{i:024x}",
         )
@@ -152,4 +167,42 @@ def test_unlock_all_uses_the_injected_runner_once_per_group(tmp_path: Path) -> N
     assert [o.kind for o in outcomes] == ["failed"] * 4
     assert seen == [("k", "1"), ("k", "2")]
     assert trees == [[tmp_path / "r1", tmp_path / "r2"], [tmp_path / "r3", tmp_path / "r4"]]
+    assert places == [tmp_path / "r1", tmp_path / "r3"]
     assert all(o.code == "agent" for o in outcomes)
+
+
+def test_a_failed_group_key_keeps_no_traceback_and_no_frames() -> None:
+    """The failure kept for the rest of the group is a kind and a message, not the exception: an
+    exception holds its traceback, which holds the frames of the key command runner (review)."""
+
+    def produce() -> bytes:
+        secret = b"stand-in for what a key command printed"  # noqa: F841 - lives in this frame
+        raise unlock.KeyCommandError("keyCommand failed (exit code 1)")
+
+    source = GroupKey(produce)
+    with pytest.raises(unlock.KeyCommandError):
+        source.get()
+    with pytest.raises(unlock.KeyCommandError, match="exit code 1") as again:
+        source.get()
+    assert again.value.__traceback__ is not None and again.value.__cause__ is None
+    frames = []
+    tb = again.value.__traceback__
+    while tb is not None:
+        frames.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    assert "produce" not in frames  # the producer's frame is not reachable from the stored failure
+    assert not hasattr(source, "_error")
+    source.wipe()
+
+
+def test_an_unexpected_exception_in_the_producer_becomes_a_short_message() -> None:
+    def produce() -> bytes:
+        raise OSError(13, r"C:\somewhere\secret-name")
+
+    source = GroupKey(produce)
+    with pytest.raises(OSError):
+        source.get()
+    with pytest.raises(unlock.KeyCommandError) as again:
+        source.get()
+    assert str(again.value) == "the key command failed (PermissionError)"
+    assert "secret-name" not in str(again.value)

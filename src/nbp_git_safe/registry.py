@@ -79,7 +79,11 @@ def path_problem(text: object) -> str | None:
     if os.name == "nt":
         drive, rest = os.path.splitdrive(text)
         if text.startswith(("\\\\", "//")) or len(drive) != 2 or drive[1] != ":":
-            return "not a local drive path (UNC, device and relative paths are not supported)"
+            return (
+                "not a local drive path: network (UNC), device and relative paths are not "
+                "supported, and a mapped network drive counts as a network path (it resolves to "
+                "\\\\server\\share); keep the repository on a local drive"
+            )
         if not rest.startswith("\\"):
             return "not an absolute path"
         if _WINDOWS_BAD_CHARS.search(rest):

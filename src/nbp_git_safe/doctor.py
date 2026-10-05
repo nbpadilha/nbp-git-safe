@@ -105,9 +105,18 @@ def _vault_divergence(git: Git, repo: Repo, cfg: Config) -> Finding | None:
 
 
 def run_doctor(
-    git: Git, repo: Repo, cfg: Config, environ: Mapping[str, str] | None = None
+    git: Git,
+    repo: Repo,
+    cfg: Config,
+    environ: Mapping[str, str] | None = None,
+    *,
+    names: bool = True,
 ) -> list[Finding]:
+    """The findings. With ``names=False`` (``doctor --all``, the tray) no path of a protected file
+    and no pattern is printed, only counts and the instruction to run ``doctor`` inside the
+    repository: the output of ``--all`` is meant to be safe to paste, to log and to show."""
     found: list[Finding] = []
+    inside = "run `nbp-git-safe doctor` inside the repository to see which"
 
     def add(level: str, message: str) -> None:
         found.append(Finding(level, message))
@@ -208,7 +217,8 @@ def run_doctor(
         listed = ", ".join(tracked[:LISTED]) + (" ..." if len(tracked) > LISTED else "")
         add(
             PROBLEM,
-            f"{len(tracked)} protected file(s) are tracked on the main branch ({listed}); "
+            f"{len(tracked)} protected file(s) are tracked on the main branch "
+            f"({listed if names else inside}); "
             "untrack with `git rm --cached` (history may already contain them: see purge)",
         )
     elif not any(f.message.startswith("could not check for tracked") for f in found):
@@ -224,9 +234,10 @@ def run_doctor(
             WARN,
             f"{len(dropped)} pattern(s) were removed from .nbp-safe, or are defeated there by a "
             f"negation, but are still protected here by this clone's memory of earlier versions "
-            f"({listed}); if the change was not yours, check `git log -p -- .nbp-safe`; to drop "
-            "one for real: `nbp-git-safe unprotect <pattern>` (or `unprotect --accept-current` "
-            "to take the current file as the only base)",
+            f"({listed if names else inside}); if the change was not yours, check "
+            "`git log -p -- .nbp-safe`; to drop one for real: `nbp-git-safe unprotect "
+            "<pattern>` (or `unprotect --accept-current` to take the current file as the only "
+            "base)",
         )
     sources = guard.pattern_sources(git, repo, refresh=False)
     stash = _stash_findings(git, sources)
@@ -276,10 +287,31 @@ def run_doctor(
             WARN,
             "no keyCommand configured (git config nbp-safe.keyCommand '[...]'): unlock cannot run",
         )
+    elif unlock.depends_on_cwd(cfg.key_command, repo.toplevel):
+        add(
+            WARN,
+            "keyCommand holds a relative path: it always runs from the repository root, but "
+            "`unlock --all` and the tray then give this repository a key prompt of its own; "
+            "an absolute path is portable",
+        )
+    if cfg.key_id is None:
+        add(
+            WARN,
+            "no key id is registered for this repository (git config nbp-safe.keyId): `unlock` "
+            "run here, or the first `seal`, records it; until then `unlock --all` and the tray "
+            "refuse a repository that has no vault yet",
+        )
     if status is None or status.get("locked"):
         add(INFO, "agent is locked: run `nbp-git-safe unlock` for content checks and sealing")
     else:
         add(OK, f"agent unlocked (key {status['key_id']})")
+        if cfg.key_id is not None and status["key_id"] != cfg.key_id:
+            add(
+                PROBLEM,
+                f"the agent holds key {status['key_id']} but this repository is registered for "
+                f"key {cfg.key_id}: run `nbp-git-safe lock` and `unlock`; if the key was "
+                "changed on purpose, `nbp-git-safe key-id --accept <id>`",
+            )
         try:
             with agent.AgentClient.connect(repo.state_dir) as backend:
                 state = vault.load_vault(git, backend, cfg, use_remote_fallback=True)

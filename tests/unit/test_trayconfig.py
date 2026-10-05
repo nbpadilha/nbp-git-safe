@@ -38,7 +38,8 @@ def test_save_load_round_trip_and_update() -> None:
     updated = trayconfig.update(unlockAtLogin=True)
     assert updated.unlockAtLogin is True and updated.sealIntervalMinutes == 5
     assert trayconfig.load()[0] == updated
-    assert sorted(p.name for p in agent.runtime_root().iterdir()) == [trayconfig.CONFIG_NAME]
+    names = sorted(p.name for p in agent.runtime_root().iterdir())
+    assert names == [trayconfig.CONFIG_NAME, trayconfig.CONFIG_NAME + ".lock"]  # no temp file
 
 
 PARTIAL = [
@@ -68,6 +69,9 @@ BAD = [
     ({"sealPush": 1}, "true or false"),
     ({"sealPush": "true"}, "true or false"),
     ({"unlockAtLogin": None}, "true or false"),
+    ({"notifications": "loud"}, "expected one of full, minimal"),
+    ({"notifications": 1}, "expected one of full, minimal"),
+    ({"notifications": None}, "expected one of full, minimal"),
     ({"sealpush": True}, "unknown option"),
     ({"keyCommand": ["x"]}, "unknown option"),
     ({"": 1}, "unknown option"),
@@ -109,6 +113,9 @@ def test_command_line_assignments() -> None:
     assert trayconfig.parse_assignment("sealIntervalMinutes=30") == ("sealIntervalMinutes", 30)
     assert trayconfig.parse_assignment("sealPush=TRUE") == ("sealPush", True)
     assert trayconfig.parse_assignment("unlockAtLogin=false") == ("unlockAtLogin", False)
+    assert trayconfig.parse_assignment("notifications=Minimal") == ("notifications", "minimal")
+    assert trayconfig.parse(b'{"notifications": "minimal"}').notifications == "minimal"
+    assert trayconfig.TrayConfig().notifications == "full"
     for bad in (
         "nope=1",
         "sealPush",
@@ -177,3 +184,33 @@ def test_log_rotates_and_never_raises(tmp_path: Path) -> None:
     assert (tmp_path / "tray.log.1").exists()
     TrayLog(tmp_path / "missing" / "dir" / "x.log").write("tick")  # unwritable: silent
     TrayLog(None).write("tick")  # no file at all
+
+
+def test_two_updates_at_the_same_moment_both_survive() -> None:
+    """Review (informational): ``update`` used to read the file outside the lock, so a menu click
+    and ``tray --config`` at the same moment could lose one change. Here the competing update is
+    started right after the read of the first one: it must wait for the lock and apply on top."""
+    import threading
+
+    trayconfig.save(trayconfig.TrayConfig())
+    competing = threading.Thread(target=lambda: trayconfig.update(sealPush=True))
+    real_load = trayconfig.load
+    started: list[bool] = []
+
+    def load_then_compete() -> tuple[trayconfig.TrayConfig, str | None]:
+        result = real_load()
+        if not started:
+            started.append(True)
+            competing.start()
+            competing.join(0.5)  # a lock held across the read makes this wait; none, not
+        return result
+
+    trayconfig.load = load_then_compete  # type: ignore[assignment]
+    try:
+        trayconfig.update(sealIntervalMinutes=30)
+    finally:
+        trayconfig.load = real_load  # type: ignore[assignment]
+    competing.join(30)
+    final, error = trayconfig.load()
+    assert error is None
+    assert final.sealIntervalMinutes == 30 and final.sealPush is True  # neither change was lost

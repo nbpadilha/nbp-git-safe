@@ -309,25 +309,35 @@ def test_concurrent_writers_in_processes_lose_nothing(tmp_path: Path) -> None:
     assert {e.path for e in registry.load().entries} == {registry.canonical(f) for f in folders}
 
 
-def test_a_stale_lock_is_taken_over_and_a_live_one_times_out(tmp_path: Path) -> None:
+def test_a_leftover_lock_file_is_free_and_a_live_holder_times_out(tmp_path: Path) -> None:
     (folder,) = make_dirs(tmp_path, "x")
     base = agent.private_root(create=True)
     assert base is not None
     lock = base / registry.LOCK_NAME
-    lock.write_bytes(b"")
+    lock.write_bytes(b"")  # what a dead writer leaves: the file, held by nobody
     old = os.stat(lock).st_mtime - 10_000
     os.utime(lock, (old, old))
-    assert registry.add(folder) is True  # the dead owner's lock was removed
-    lock.write_bytes(b"")  # a fresh one
-    with pytest.raises(statefile.StateFileError), statefile.file_lock(lock, wait=0.2):
-        pass
+    assert registry.add(folder) is True  # nothing to take over: the system dropped the lock
+    with statefile.file_lock(lock):  # a live holder (this process) blocks the others
+        other = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from pathlib import Path; from nbp_git_safe import statefile; "
+                "statefile.file_lock(Path(sys.argv[1]), wait=0.2).__enter__()",
+                str(lock),
+            ],
+            capture_output=True,
+            check=False,
+        )
+        assert other.returncode != 0 and b"another process" in other.stderr
 
 
 def test_write_is_atomic_no_temporary_files_remain(tmp_path: Path) -> None:
     (folder,) = make_dirs(tmp_path, "x")
     registry.add(folder)
     names = sorted(p.name for p in agent.runtime_root().iterdir())
-    assert names == [registry.REGISTRY_NAME]
+    assert names == [registry.REGISTRY_NAME, registry.LOCK_NAME]  # no temporary file remains
 
 
 def test_add_refuses_a_path_the_registry_would_not_read(tmp_path: Path) -> None:
@@ -335,3 +345,10 @@ def test_add_refuses_a_path_the_registry_would_not_read(tmp_path: Path) -> None:
         pytest.skip("every absolute POSIX path is acceptable")
     with pytest.raises(registry.RegistryError, match="cannot register"):
         registry.add("\\\\server\\share\\repo")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="mapped drives and UNC paths exist on Windows")
+def test_the_message_for_a_network_path_names_the_mapped_drive_case() -> None:
+    problem = registry.path_problem(r"\server\share\repo")
+    assert problem is not None
+    assert "mapped network drive" in problem and "local drive" in problem
