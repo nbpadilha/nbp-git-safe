@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 STATE_DIRNAME = "nbp-safe"
 
@@ -47,9 +47,10 @@ _GIT_REPO_ENV_PREFIXES = ("GIT_PUSH_OPTION_",)
 # repository (``Git.clean``): those need none of the user's configuration, and a value planted in
 # the environment of a hook (``GIT_CONFIG_COUNT``/``KEY_n``/``VALUE_n`` or
 # ``GIT_CONFIG_PARAMETERS`` set ``core.fsmonitor``, ``core.hooksPath``, ``core.pager``...) must not
-# run anything there. The calls about the USER'S repository keep the whole environment: fetch,
-# push and ``git config`` legitimately depend on ``GIT_ASKPASS``, ``GIT_SSH_COMMAND``,
-# ``GIT_CONFIG_*`` and friends. ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM``/``GIT_CONFIG_NOSYSTEM``
+# run anything there. The calls about the USER'S repository keep every git variable (within the
+# allow-list of ``child_env``): fetch, push and ``git config`` legitimately depend on
+# ``GIT_ASKPASS``, ``GIT_SSH_COMMAND``, ``GIT_CONFIG_*`` and friends.
+# ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM``/``GIT_CONFIG_NOSYSTEM``
 # stay: they only choose WHICH config files are read (the tests' isolation uses them).
 GIT_INJECTION_ENV = (
     "GIT_CONFIG_PARAMETERS",
@@ -68,6 +69,58 @@ _GIT_INJECTION_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE")
 
 
 NO_CWD_EXE = "NoDefaultCurrentDirectoryInExePath"
+
+# The environment a child (git, the keyCommand) receives: an ALLOW-list, not the caller's whole
+# environment. A token in the caller's environment (``OP_SERVICE_ACCOUNT_TOKEN`` of an unattended
+# run, a cloud credential...) must not reach git, the hooks and helpers git starts, or a
+# keyCommand that does not need it. Kept: what locates the user, the system, the terminal, the
+# locale, temp and proxy settings; and, by prefix, git's own variables, ssh-agent, the XDG
+# directories, this tool's ``NBP_SAFE_*`` and the credential helpers commonly behind a push (gh:
+# ``GH_*``/``GITHUB_*``; Git Credential Manager: ``GCM_*``; WSL interop: ``WSL*``). ``OP_*`` is
+# never passed to git; a keyCommand that IS the 1Password CLI (``op``) gets ``OP_*`` too.
+# ``NBP_SAFE_PASS_ENV`` (comma-separated names) adds variables for an unusual helper; ``OP_*``
+# names in it reach the keyCommand only.
+CHILD_ENV_NAMES = frozenset(
+    {
+        "PATH", "PATHEXT", "HOME", "USER", "LOGNAME", "USERNAME", "SHELL", "TERM", "COLORTERM",
+        "TZ", "LANG", "LANGUAGE", "TMPDIR", "TEMP", "TMP", "DISPLAY", "WAYLAND_DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS", "GNUPGHOME", "GPG_TTY", "GPG_AGENT_INFO",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+        # Windows
+        "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+        "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ALLUSERSPROFILE", "PROGRAMFILES",
+        "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)",
+        "COMMONPROGRAMW6432", "PUBLIC", "COMPUTERNAME", "USERDOMAIN", "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE", "OS", "MSYSTEM",
+    }
+)  # fmt: skip
+CHILD_ENV_PREFIXES = ("LC_", "XDG_", "GIT_", "SSH_", "NBP_SAFE_", "GH_", "GITHUB_", "GCM_", "WSL")
+PASS_ENV = "NBP_SAFE_PASS_ENV"  # noqa: S105 - the name of a variable, not a value
+_OP_PREFIX = "OP_"
+
+
+def minimal_env(env: Mapping[str, str], *, op: str = "never") -> dict[str, str]:
+    """The allow-listed part of ``env`` (see ``CHILD_ENV_NAMES``). ``op`` decides ``OP_*``:
+    ``"never"`` (git), ``"listed"`` (only names in ``NBP_SAFE_PASS_ENV``) or ``"all"``."""
+    extra = {n.strip().upper() for n in env.get(PASS_ENV, "").split(",") if n.strip()}
+    kept: dict[str, str] = {}
+    for key, value in env.items():
+        name = key.upper()
+        if name.startswith(_OP_PREFIX):
+            if op == "all" or (op == "listed" and name in extra):
+                kept[key] = value
+            continue
+        if name in CHILD_ENV_NAMES or name.startswith(CHILD_ENV_PREFIXES) or name in extra:
+            kept[key] = value
+    return kept
+
+
+def key_command_env(argv0: str, env: Mapping[str, str]) -> dict[str, str]:
+    """The keyCommand's environment: the allow-list, plus ``OP_*`` when it is ``op`` itself, or
+    the ``OP_*`` names listed in ``NBP_SAFE_PASS_ENV`` (a wrapper script that runs ``op``)."""
+    stem = PureWindowsPath(argv0).stem.lower()  # splits on "/" and "\" alike: op, op.exe
+    return {**minimal_env(env, op="all" if stem == "op" else "listed"), NO_CWD_EXE: "1"}
 
 
 def _norm(path: str | os.PathLike[str]) -> str:
@@ -167,8 +220,9 @@ def git_executable() -> str:
 
 
 def child_env(env: Mapping[str, str]) -> dict[str, str]:
-    """``env`` plus ``NoDefaultCurrentDirectoryInExePath=1`` for a child process."""
-    return {**env, NO_CWD_EXE: "1"}
+    """The allow-listed part of ``env`` (``minimal_env``: never ``OP_*``) plus
+    ``NoDefaultCurrentDirectoryInExePath=1`` for a child git process."""
+    return {**minimal_env(env), NO_CWD_EXE: "1"}
 
 
 def clean_env(env: Mapping[str, str] | None = None) -> dict[str, str]:

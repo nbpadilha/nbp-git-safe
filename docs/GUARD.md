@@ -160,12 +160,13 @@ Hooks never ask the password manager on their own. Only `nbp-safe.autoUnlock=tru
 `.git/config`) lets a hook run `keyCommand`, with the `keyCommand` timeout; on failure the hook
 degrades to the path check and says why.
 
-A hook that cannot talk to the agent degrades the same way. One case is specific to Windows: the
-agent runs **elevated** and the hook does not (or the reverse), so the agent's process token cannot
-be opened and the client cannot check who serves the pipe. That is not treated as an impostor and
-nothing is sent to it: the hook prints `agent unavailable (... elevation ...)`, runs only the path
-check and the vault is not opened or sealed; start git and `nbp-git-safe unlock` from the same kind
-of terminal. `doctor` reports it as a warning. A vault branch this clone has never verified is not
+A hook that cannot talk to the agent degrades the same way, with one exception specific to Windows:
+the agent runs **elevated** and the hook does not (or the reverse), so the agent's process token
+cannot be opened and the client cannot check who serves the pipe. That is not treated as an
+impostor and nothing is sent to it, but it is not skipped in silence either (audit of 2026-10-10):
+`pre-commit` and `pre-push` **refuse** with `agent unavailable (... elevation ...)` and
+`post-commit` reports an ERROR, at a terminal or not; start git and `nbp-git-safe unlock` from the
+same kind of terminal (or bypass the commit check knowingly with `git commit --no-verify`). `doctor` reports it as a warning. A vault branch this clone has never verified is not
 adopted by a hook either (`post-merge` prints why; adopt it once with `open --confirm-first-adopt`,
 see `MULTI.md`).
 
