@@ -1,16 +1,26 @@
 # SPDX-License-Identifier: MIT
-"""Findings of the independent audit of 2026-10-10 (agy): an unattended run must never end
-"green" with a stale vault, nor skip a check in silence."""
+"""Findings of the independent audit of 2026-10-10 (agy): an unattended run never ends "green" with
+a stale vault, a check is never skipped in silence, and the vault tree is exactly what the
+authenticated index describes."""
 
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 
 import pytest
 
 from nbp_git_safe import hooks
+from tests.helpers import NbpRepo
 from tests.integration.conftest import Env
 from tests.integration.guardkit import commit, first_protected, remote_refs
+from tests.integration.test_vault_tamper import (
+    clone_of_main,
+    forged_vault,
+    read_vault,
+    snapshot,
+    write_vault_commit,
+)
 
 
 @pytest.fixture
@@ -88,3 +98,25 @@ def test_unattended_commit_and_push_with_a_locked_agent_never_end_green(hooked: 
     code_only = repo.raw("push", "origin", "main")
     assert code_only.returncode != 0 and "push refused" in code_only.stderr
     repo.assert_no_leak(hooked.bare)
+
+
+# ------------------------------------------------- 3: blobs in store/ the index does not list
+
+
+def test_open_refuses_store_blobs_the_index_does_not_reference(
+    env: Env, clone_factory: Callable[..., NbpRepo], unlock_fast: Callable[..., object]
+) -> None:
+    clone = clone_of_main(env, clone_factory)
+    forged_vault(clone, {"a" * 32: ("reports/ok.txt", b"fine")})
+    files = read_vault(clone)
+    unlock_fast(clone)
+    extra = {**files, "store/" + "b" * 32: files["store/" + "a" * 32]}  # well-formed, unlisted
+    write_vault_commit(clone, extra)
+    before = snapshot(clone.path)
+    refused = clone.cli("open", "--confirm-first-adopt")
+    assert refused.code == 1 and "does not reference" in refused.err, refused.err
+    assert snapshot(clone.path) == before
+    assert clone.cli("ls").code != 0
+    write_vault_commit(clone, files)  # the same vault without the extra blob opens
+    assert clone.cli("open", "--confirm-first-adopt").code == 0, clone.cli("ls").err
+    assert clone.read("reports/ok.txt") == b"fine"
