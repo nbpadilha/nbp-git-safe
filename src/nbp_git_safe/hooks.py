@@ -303,24 +303,7 @@ def _say(message: str) -> None:
     sys.stderr.write(f"nbp-git-safe: {message}\n")
 
 
-_TRUE = ("1", "true", "yes", "on")
-_FALSE = ("0", "false", "no", "off")
-
-
-def non_interactive() -> bool:
-    """Is this hook running unattended? ``NBP_SAFE_NONINTERACTIVE`` decides when set; otherwise a
-    set ``CI`` or a stderr that is not a terminal means nobody is there to read a warning."""
-    flag = os.environ.get("NBP_SAFE_NONINTERACTIVE", "").strip().lower()
-    if flag in _TRUE:
-        return True
-    if flag in _FALSE:
-        return False
-    if os.environ.get("CI", "").strip().lower() not in ("", *_FALSE):
-        return True
-    try:
-        return not sys.stderr.isatty()
-    except (AttributeError, ValueError, OSError):
-        return True
+non_interactive = unlock.non_interactive  # unattended run? (shared with the keyCommand runner)
 
 
 def _inspection_failed(reason: str) -> bool:
