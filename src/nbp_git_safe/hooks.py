@@ -390,6 +390,7 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
         updates = guard.parse_push_stdin(stdin_text)
         backend, reason = acquire_backend(repo, cfg)
         warnings: list[str] = []
+        refusals: list[str] = []
         try:
             if backend is not None:
                 try:
@@ -403,9 +404,11 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
                 else:
                     pushed = [u for u in updates if u.local_ref == cfg.vault_ref]
                     if commit is not None and any(u.local_oid != commit for u in pushed):
-                        warnings.append(
-                            "the vault changed while preparing this push; push again to send "
-                            "the new vault commit"
+                        # git read the refs before this hook ran: it would send the OLD vault
+                        # commit. That must never look like a successful push of the vault.
+                        refusals.append(
+                            "the vault was sealed into a new commit while preparing this push and "
+                            "git would send the old one; nothing was pushed: run `git push` again"
                         )
             else:
                 warnings.append(
@@ -431,12 +434,16 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
         return 1
     for warning in [*warnings, *report.warnings]:
         _say(f"warning: {warning}")
+    if refusals:
+        _say("push refused:")
+        for line in refusals:
+            sys.stderr.write(f"  {line}\n")
     if report.violations:
         _say("push blocked:")
         for line in guard.format_report(report):
             sys.stderr.write(line + "\n")
         return 1
-    return 0
+    return 1 if refusals else 0
 
 
 def post_commit() -> int:

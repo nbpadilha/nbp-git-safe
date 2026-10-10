@@ -196,12 +196,16 @@ def test_pre_push_seals_first_when_unlocked(hooked: Env) -> None:
     assert repo.raw("push", "-q", "origin", "main").returncode == 0
     assert hooked.commits() == 2  # sealed by the hook, although only `main` was pushed
     repo.write(first_protected(repo, ".json"), '{"changed": "again"}\n')
+    before = remote_refs(hooked).get("refs/heads/nbp-safe")
     both = repo.raw("push", "origin", "main", "nbp-safe")
-    assert both.returncode == 0
-    assert "push again" in both.stderr  # the pushed vault tip predates the pre-push seal
+    # the pushed vault tip predates the pre-push seal: the push is refused, never "green" with
+    # the old vault commit (auditoria agy 2026-10-10, achado 2)
+    assert both.returncode != 0
+    assert "push refused" in both.stderr and "run `git push` again" in both.stderr
     assert hooked.commits() == 3
-    assert remote_refs(hooked)["refs/heads/nbp-safe"] != hooked.tip()
-    assert repo.raw("push", "-q", "origin", "nbp-safe").returncode == 0
+    assert remote_refs(hooked).get("refs/heads/nbp-safe") == before  # nothing was sent
+    again = repo.raw("push", "-q", "origin", "main", "nbp-safe")
+    assert again.returncode == 0, again.stderr
     assert remote_refs(hooked)["refs/heads/nbp-safe"] == hooked.tip()
     repo.assert_no_leak(hooked.bare)
 
