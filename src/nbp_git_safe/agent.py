@@ -105,14 +105,15 @@ class HandshakeError(AgentError):
 class ProcessInspectionError(HandshakeError):
     """The process that serves the connection cannot be inspected from this one. On Windows that
     is what an agent running ELEVATED looks like to a non-elevated hook (or the reverse): the
-    process token is not readable. Nothing is sent to it; the callers degrade to the path check
-    and tell the user why."""
+    process token is not readable. Nothing is sent to it; the hooks refuse (they never skip the
+    content check in silence) and tell the user why."""
 
 
 ELEVATION_MESSAGE = (
     "the agent's process cannot be inspected from this one; it probably runs at another "
-    "elevation level (elevated while this process is not, or the reverse): nothing is sent to it, "
-    "only the path check runs. Run git and `nbp-git-safe unlock` from the same kind of terminal"
+    "elevation level (elevated while this process is not, or the reverse): nothing is sent to it "
+    "and the content check cannot run. Run git and `nbp-git-safe unlock` from the same kind of "
+    "terminal"
 )
 
 

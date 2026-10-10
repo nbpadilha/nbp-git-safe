@@ -26,6 +26,10 @@ and can ``unlock``. An unattended run (stderr is not a terminal, ``CI`` is set, 
 ``NBP_SAFE_NONINTERACTIVE=1``; ``NBP_SAFE_NONINTERACTIVE=0`` forces the interactive behaviour)
 must not end "green" with a stale vault: ``post-commit`` exits non-zero with an ERROR line (git
 ignores that status, so the message is the signal) and ``pre-push`` refuses the push.
+
+An agent this process cannot inspect (on Windows: one running at another elevation level) is never
+a reason to skip a check in silence: ``pre-commit`` and ``pre-push`` refuse in both modes, and
+``post-commit`` reports an ERROR. ``git commit --no-verify`` remains the explicit bypass.
 """
 
 from __future__ import annotations
@@ -319,6 +323,11 @@ def non_interactive() -> bool:
         return True
 
 
+def _inspection_failed(reason: str) -> bool:
+    """The agent is there but this process cannot verify it (another elevation level)."""
+    return agent.ELEVATION_MESSAGE in reason
+
+
 def _env_without_index() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
 
@@ -396,7 +405,8 @@ def pre_commit() -> int:
         return 1
     for warning in report.warnings:
         _say(f"warning: {warning}")
-    if sources and backend is None:
+    blind = bool(sources) and backend is None and _inspection_failed(reason)
+    if sources and backend is None and not blind:
         _say(f"warning: content check skipped, vault {_locked_hint(reason)}")
     if report.violations:
         _say("commit blocked: protected material would enter the main branch:")
@@ -405,6 +415,12 @@ def pre_commit() -> int:
         _say(
             "unstage it (git restore --staged -- <path>); a file staged with `git add -f` leaves "
             "its content in .git/objects until `git prune --expire now`"
+        )
+        return 1
+    if blind:  # fail closed: never skip the content check in silence (audit agy, finding 5)
+        _say(
+            f"commit refused: the content check cannot run, {_locked_hint(reason)}. Bypass it "
+            "knowingly with `git commit --no-verify`"
         )
         return 1
     return 0
@@ -444,7 +460,9 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
                         )
             else:
                 message = f"the vault was not sealed or content-checked: {_locked_hint(reason)}"
-                if strict and protect.list_protected(git, repo):
+                if _inspection_failed(reason):
+                    refusals.append(message)
+                elif strict and protect.list_protected(git, repo):
                     refusals.append(
                         message + " (non-interactive run: unlock first, or set "
                         "`git config nbp-safe.autoUnlock true`)"
@@ -495,7 +513,7 @@ def post_commit() -> int:
         backend, reason = acquire_backend(repo, cfg)
         if backend is None:
             if protect.list_protected(git, repo):
-                if strict:
+                if strict or _inspection_failed(reason):
                     _say(
                         f"ERROR: protected files were not sealed: {_locked_hint(reason)}. The "
                         "vault is out of date; a non-interactive push is refused until it is sealed"
