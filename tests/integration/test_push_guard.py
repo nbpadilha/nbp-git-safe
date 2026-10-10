@@ -87,7 +87,9 @@ def test_locked_push_cannot_content_check_and_says_so(hooked: Env) -> None:
     repo.sh("add", "public/another-copy.txt")
     bypass_commit(hooked)
     hooked.agent.stop()
-    result = repo.raw("push", "origin", "main")
+    unattended = repo.raw("push", "origin", "main")  # stderr is a pipe: refused (audit agy, 1)
+    assert unattended.returncode != 0 and "push refused" in unattended.stderr
+    result = repo.raw("push", "origin", "main", env={"NBP_SAFE_NONINTERACTIVE": "0"})
     assert result.returncode == 0, result.stderr
     assert "not sealed or content-checked" in result.stderr and "unlock" in result.stderr
 
@@ -154,7 +156,9 @@ def test_a_tampered_index_is_caught_only_with_the_key(hooked: Env) -> None:
     unlocked = repo.raw("push", "origin", "nbp-safe")
     assert unlocked.returncode != 0 and "does not verify" in unlocked.stderr
     hooked.agent.stop()
-    locked = repo.raw("push", "origin", "nbp-safe")
+    unattended = repo.raw("push", "origin", "nbp-safe")  # stderr is a pipe: non-interactive
+    assert unattended.returncode != 0 and "push refused" in unattended.stderr
+    locked = repo.raw("push", "origin", "nbp-safe", env={"NBP_SAFE_NONINTERACTIVE": "0"})
     assert locked.returncode == 0, locked.stderr  # structure is fine; authentication needs the key
     assert "structurally only" in locked.stderr
 
@@ -181,7 +185,7 @@ def test_code_push_with_a_stale_vault_passes_with_a_warning_when_locked(hooked: 
     repo.write(first_protected(repo, ".json"), '{"changed": true}\n')
     tip = hooked.tip()
     hooked.agent.stop()
-    result = repo.raw("push", "origin", "main")
+    result = repo.raw("push", "origin", "main", env={"NBP_SAFE_NONINTERACTIVE": "0"})
     assert result.returncode == 0, result.stderr
     assert "not sealed" in result.stderr
     assert hooked.tip() == tip  # locked: nothing was sealed

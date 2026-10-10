@@ -42,8 +42,9 @@ def test_pre_commit_degrades_to_the_path_check_and_mentions_elevation(
 
 
 def test_pre_push_degrades_with_a_warning_and_still_checks_paths(
-    unreachable_agent: Env, capsys: pytest.CaptureFixture[str]
+    unreachable_agent: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setenv("NBP_SAFE_NONINTERACTIVE", "0")
     repo = unreachable_agent.repo
     oid = repo.sh("rev-parse", "refs/heads/main").strip()
     line = f"refs/heads/main {oid} refs/heads/main {'0' * 40}\n"
@@ -53,9 +54,10 @@ def test_pre_push_degrades_with_a_warning_and_still_checks_paths(
 
 
 def test_post_commit_does_not_seal_and_says_so(
-    unreachable_agent: Env, capsys: pytest.CaptureFixture[str]
+    unreachable_agent: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     tip = unreachable_agent.tip()
+    monkeypatch.setenv("NBP_SAFE_NONINTERACTIVE", "0")
     assert hooks.run_hook("post-commit", []) == 0
     assert unreachable_agent.tip() == tip  # nothing was sealed behind a connection we cannot trust
     err = capsys.readouterr().err

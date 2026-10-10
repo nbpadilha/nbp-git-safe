@@ -132,6 +132,17 @@ The agent has to be unlocked: run `nbp-git-safe unlock` once per TTL window (8 h
 manager will prompt). Locked, commits still work: the main branch stays protected by path, nothing
 is sealed, and a hint is printed.
 
+**Unattended runs** (a scheduled task, CI, a script: stderr is not a terminal, `CI` is set, or
+`NBP_SAFE_NONINTERACTIVE=1`) must not end "green" with a stale vault. There, when the agent is
+locked or expired and `autoUnlock` is off, `post-commit` prints an `ERROR` line and exits non-zero
+(git ignores that status, so the commit itself still succeeds) and `pre-push` **refuses the push**
+(nothing was sealed and the content check could not run). Unlock first (`nbp-git-safe unlock`, then
+commit and push), or set `autoUnlock true`. At a terminal the old behaviour stays: a warning, and
+you decide (`NBP_SAFE_NONINTERACTIVE=0` forces it). A local vault that fails to seal (damaged)
+refuses an unattended push of the vault branch, never a push of the code alone.
+If `pre-push` seals a new vault commit while the vault branch is being pushed, git would send the
+old one (it read the refs before the hook ran): the push is refused, run `git push` again.
+
 Useful commands: `status`, `ls`, `log <path>`, `diff <path>`, `mv <old> <new>` (keeps a file's
 identity), `rm <path>`, `doctor` (checks the setup), `lock`.
 
