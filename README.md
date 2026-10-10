@@ -189,17 +189,37 @@ three-way merge by file id; when both edited the same file, both versions are ke
   backup tools and cloud-sync folders can read them; `doctor` warns when the repo is inside a
   OneDrive / Dropbox / Google Drive / iCloud folder.
 * **What the remote still learns:** that a vault exists, the branch name, how many files, their
-  approximate sizes (padded to 4 KiB buckets by default), when they change, and which files have
-  identical content (deterministic encryption per id; equal content in two files gives different
-  blobs, but a file unchanged between commits keeps its blob).
+  approximate sizes (padded to 4 KiB buckets by default; a bucket below 2, which would pad nothing,
+  is refused), when they change, and which files have identical content (deterministic encryption
+  per id; equal content in two files gives different blobs, but a file unchanged between commits
+  keeps its blob).
+* **Deterministic encryption (AES-SIV) reveals equality over time.** A file's blob depends only on
+  its id and content, so a file that goes **back** to an earlier content gets the **same blob** it
+  had then: a reader of the remote can tell that file X at commit B equals file X at commit A (a
+  reverted setting, a toggled flag), though never what the content is. Nothing is added to hide
+  this (no per-commit salt); accept it or keep such files out of the vault.
 * **A compromised key exposes the whole history** of that vault. A compromised machine with an
   unlocked agent exposes everything the agent can decrypt.
 * **Bypasses exist.** `git commit --no-verify` skips the commit hook, and `git add -f` writes the
   content into `.git/objects` before any hook runs. The push guard blocks what it can see, but
   nothing outside your control stops a determined user. See [docs/GUARD.md](docs/GUARD.md).
 * **Whole-file blobs.** Every change stores a new encrypted blob of the full file, so repositories
-  with large, frequently rewritten files grow fast. One file is limited to 64 MiB.
-* Python cannot reliably wipe memory; the key lives in ordinary objects for the agent's lifetime.
+  with large, frequently rewritten files grow fast. **One file is limited to 64 MiB** (the whole
+  file is held in memory, no chunking): a larger one is refused with a message and not sealed, so
+  keep generated bundles below that size (split or compress them).
+* **Python cannot wipe memory.** The master key and the derived keys are immutable `bytes` objects:
+  they cannot be zeroed and stay in the agent's memory for its lifetime (and briefly in the CLI
+  process that ran `unlock`) until the allocator reuses them. A memory dump or swap of an unlocked
+  machine can contain them.
+* **Windows file replacement.** `open` writes each file to a temporary next to it and renames it
+  over the target (`os.replace`), without retries: if an antivirus or indexer holds the file at that
+  moment the rename fails, `open` reports `<path>: could not be written` for that file only, keeps
+  going, and the next `open` (or `post-merge`) writes it.
+* **The push guard does not decrypt blobs.** With the key, `pre-push` authenticates the vault index
+  and its chain and checks that every listed blob (and no other) is there; decrypting every blob is
+  left to `open`/`status` on the receiving side, which refuse a bad one before writing anything. A
+  writer without the key cannot pass the index chain, so this costs no security, only an earlier
+  error.
 * Erasure (LGPD/GDPR) needs a history rewrite and may need your Git host's help.
 * Clients that do not run git hooks (some GUIs, libgit2-based tools) bypass the hook layers.
 
@@ -215,7 +235,18 @@ AES-SIV blobs and names exist only inside the encrypted index. They can see coun
 and timing.
 
 **What if the agent is killed or the TTL expires?** The next command fails closed and tells you to
-unlock. Nothing is sealed and no plaintext is written anywhere new.
+unlock. Nothing is sealed and no plaintext is written anywhere new. An unattended run says so with
+an error and its push is refused (see *Daily flow*). The TTL runs on both the wall clock and the
+monotonic clock, so setting the clock back does not extend it.
+
+**What do git and the keyCommand see of my environment?** An allow-list, not your whole
+environment: user, system, terminal, locale, temp and proxy variables, plus `GIT_*`, `SSH_*`,
+`XDG_*`, `LC_*`, `NBP_SAFE_*` and the usual push credential helpers (`GH_*`/`GITHUB_*`, `GCM_*`,
+`WSL*`). `OP_*` (for example `OP_SERVICE_ACCOUNT_TOKEN`) never reaches git; a keyCommand that is
+`op` itself receives it. A helper that needs something else: list the names in
+`NBP_SAFE_PASS_ENV` (comma-separated; `OP_*` names there reach only the keyCommand, for a wrapper
+script that runs `op`). In an unattended run the keyCommand's stderr is captured and only a short,
+redacted tail is quoted when it fails.
 
 **Can a malicious remote or collaborator plant something?** Everything adopted from the remote is
 authenticated first; a malicious index cannot write outside the protected set, and a rollback or
