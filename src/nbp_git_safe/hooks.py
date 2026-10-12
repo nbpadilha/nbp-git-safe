@@ -19,6 +19,17 @@ directory. The string is a shell one-liner for git, so the path is POSIX-quoted.
 
 Handlers never ask the password manager on their own (``autoUnlock`` is opt-in). ``pre-commit`` and
 ``pre-push`` fail closed (non-zero blocks the operation); the ``post-*`` handlers never fail git.
+
+Interactive and non-interactive runs differ when the vault cannot be sealed (agent locked or
+expired, ``autoUnlock`` off). A person at a terminal gets a warning and keeps working: they see it
+and can ``unlock``. An unattended run (stderr is not a terminal, ``CI`` is set, or
+``NBP_SAFE_NONINTERACTIVE=1``; ``NBP_SAFE_NONINTERACTIVE=0`` forces the interactive behaviour)
+must not end "green" with a stale vault: ``post-commit`` exits non-zero with an ERROR line (git
+ignores that status, so the message is the signal) and ``pre-push`` refuses the push.
+
+An agent this process cannot inspect (on Windows: one running at another elevation level) is never
+a reason to skip a check in silence: ``pre-commit`` and ``pre-push`` refuse in both modes, and
+``post-commit`` reports an ERROR. ``git commit --no-verify`` remains the explicit bypass.
 """
 
 from __future__ import annotations
@@ -292,6 +303,14 @@ def _say(message: str) -> None:
     sys.stderr.write(f"nbp-git-safe: {message}\n")
 
 
+non_interactive = unlock.non_interactive  # unattended run? (shared with the keyCommand runner)
+
+
+def _inspection_failed(reason: str) -> bool:
+    """The agent is there but this process cannot verify it (another elevation level)."""
+    return agent.ELEVATION_MESSAGE in reason
+
+
 def _env_without_index() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
 
@@ -369,7 +388,8 @@ def pre_commit() -> int:
         return 1
     for warning in report.warnings:
         _say(f"warning: {warning}")
-    if sources and backend is None:
+    blind = bool(sources) and backend is None and _inspection_failed(reason)
+    if sources and backend is None and not blind:
         _say(f"warning: content check skipped, vault {_locked_hint(reason)}")
     if report.violations:
         _say("commit blocked: protected material would enter the main branch:")
@@ -378,6 +398,12 @@ def pre_commit() -> int:
         _say(
             "unstage it (git restore --staged -- <path>); a file staged with `git add -f` leaves "
             "its content in .git/objects until `git prune --expire now`"
+        )
+        return 1
+    if blind:  # fail closed: never skip the content check in silence (audit agy, finding 5)
+        _say(
+            f"commit refused: the content check cannot run, {_locked_hint(reason)}. Bypass it "
+            "knowingly with `git commit --no-verify`"
         )
         return 1
     return 0
@@ -390,6 +416,10 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
         updates = guard.parse_push_stdin(stdin_text)
         backend, reason = acquire_backend(repo, cfg)
         warnings: list[str] = []
+        refusals: list[str] = []
+        # unattended: a push must not end "green" with a stale vault or an unchecked content
+        strict = non_interactive()
+        sends_vault = any(u.local_ref == cfg.vault_ref for u in updates)
         try:
             if backend is not None:
                 try:
@@ -399,18 +429,29 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
                     crypto.NbpCryptoError,
                     index_mod.IndexValidationError,
                 ) as exc:
-                    warnings.append(f"the vault could not be sealed before the push ({exc})")
+                    message = f"the vault could not be sealed before the push ({exc})"
+                    # a damaged local vault never holds up a push of the code alone
+                    (refusals if strict and sends_vault else warnings).append(message)
                 else:
                     pushed = [u for u in updates if u.local_ref == cfg.vault_ref]
                     if commit is not None and any(u.local_oid != commit for u in pushed):
-                        warnings.append(
-                            "the vault changed while preparing this push; push again to send "
-                            "the new vault commit"
+                        # git read the refs before this hook ran: it would send the OLD vault
+                        # commit. That must never look like a successful push of the vault.
+                        refusals.append(
+                            "the vault was sealed into a new commit while preparing this push and "
+                            "git would send the old one; nothing was pushed: run `git push` again"
                         )
             else:
-                warnings.append(
-                    f"the vault was not sealed or content-checked: {_locked_hint(reason)}"
-                )
+                message = f"the vault was not sealed or content-checked: {_locked_hint(reason)}"
+                if _inspection_failed(reason):
+                    refusals.append(message)
+                elif strict and protect.list_protected(git, repo):
+                    refusals.append(
+                        message + " (non-interactive run: unlock first, or set "
+                        "`git config nbp-safe.autoUnlock true`)"
+                    )
+                else:
+                    warnings.append(message)
             report = guard.check_push(git, repo, cfg, backend, updates, remote)
         finally:
             if backend is not None:
@@ -431,16 +472,23 @@ def pre_push(args: Sequence[str], stdin_text: str) -> int:
         return 1
     for warning in [*warnings, *report.warnings]:
         _say(f"warning: {warning}")
+    if refusals:
+        _say("push refused:")
+        for line in refusals:
+            sys.stderr.write(f"  {line}\n")
     if report.violations:
         _say("push blocked:")
         for line in guard.format_report(report):
             sys.stderr.write(line + "\n")
         return 1
-    return 0
+    return 1 if refusals else 0
 
 
 def post_commit() -> int:
-    """Seal after a commit when the agent is unlocked. Never fails the commit."""
+    """Seal after a commit when the agent is unlocked. Git ignores this hook's exit status, so it
+    cannot fail the commit; when the seal did not happen in a non-interactive run it still exits
+    non-zero with an ERROR line (and the next ``pre-push`` refuses). See the module docstring."""
+    strict = non_interactive()
     try:
         repo, git, cfg = _context(_env_without_index())
         if not guard.pattern_sources(git, repo):
@@ -448,6 +496,12 @@ def post_commit() -> int:
         backend, reason = acquire_backend(repo, cfg)
         if backend is None:
             if protect.list_protected(git, repo):
+                if strict or _inspection_failed(reason):
+                    _say(
+                        f"ERROR: protected files were not sealed: {_locked_hint(reason)}. The "
+                        "vault is out of date; a non-interactive push is refused until it is sealed"
+                    )
+                    return 1
                 _say(f"protected files were not sealed: {_locked_hint(reason)}")
             return 0
         with backend:
@@ -459,8 +513,10 @@ def post_commit() -> int:
                 f"vault sealed: {len(analysis.new)} new, {len(analysis.changed)} changed "
                 f"-> {commit[:10]}"
             )
-    except Exception as exc:  # post-commit must never break the user's commit
-        _say(f"warning: could not seal after the commit ({type(exc).__name__}: {exc})")
+    except Exception as exc:  # git ignores the status: the message is what the user sees
+        label = "ERROR" if strict else "warning"
+        _say(f"{label}: could not seal after the commit ({type(exc).__name__}: {exc})")
+        return 1 if strict else 0
     return 0
 
 

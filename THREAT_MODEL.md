@@ -127,8 +127,8 @@ attacks on the `cryptography` library itself.
     the built-in Administrator is not refused for being printed as `LA`. Windows hides the token
     of an elevated process from a non-elevated one (and the reverse): when the agent's process
     cannot be inspected, the hook does not treat it as an impostor and does not give it anything;
-    it degrades to the path check and says "agent unavailable" with the elevation hint (run git
-    and `unlock` at the same level).
+    `pre-commit` and `pre-push` refuse (fail closed) and say "agent unavailable" with the elevation
+    hint (run git and `unlock` at the same level).
   * The agent process runs `python -I` (no `PYTHON*` variables, no current directory or user site on
     `sys.path`) with an explicit minimal environment, so a package planted in the temp or the
     working directory is never imported into the process that holds the key.

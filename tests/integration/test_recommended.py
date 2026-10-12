@@ -139,7 +139,10 @@ def test_resolve_executable_never_picks_the_current_directory(
     assert gitutil.resolve_executable("nothing-like-this", {"PATH": path}) == "nothing-like-this"
     explicit = str(here / "toolx")
     assert gitutil.resolve_executable(explicit, {"PATH": path}) == explicit  # a path: untouched
-    assert gitutil.child_env({"A": "1"}) == {"A": "1", "NoDefaultCurrentDirectoryInExePath": "1"}
+    assert gitutil.child_env({"PATH": "1", "A": "1"}) == {
+        "PATH": "1",
+        "NoDefaultCurrentDirectoryInExePath": "1",
+    }
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="CreateProcess looks in the current directory")

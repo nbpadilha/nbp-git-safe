@@ -180,6 +180,11 @@ def load_commit(git: Git, backend: Backend, commit: str) -> VaultState:
         parsed = Index.from_dict(backend.dec_index(blob), backend.key_id())
     except IndexValidationError:
         raise VaultTamperError("vault index failed validation") from None
+    stored = {path for path in files if path.startswith(STORE_PREFIX)}
+    if stored - {STORE_PREFIX + fid for fid in parsed.entries}:
+        # the tree must be exactly what the authenticated index describes (THREAT_MODEL.md):
+        # a blob nobody references is never "harmless padding" a writer without the key may add
+        raise VaultTamperError("vault tree has store blobs the index does not reference")
     return VaultState(commit, tree, files, parsed)
 
 

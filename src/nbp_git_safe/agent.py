@@ -105,14 +105,15 @@ class HandshakeError(AgentError):
 class ProcessInspectionError(HandshakeError):
     """The process that serves the connection cannot be inspected from this one. On Windows that
     is what an agent running ELEVATED looks like to a non-elevated hook (or the reverse): the
-    process token is not readable. Nothing is sent to it; the callers degrade to the path check
-    and tell the user why."""
+    process token is not readable. Nothing is sent to it; the hooks refuse (they never skip the
+    content check in silence) and tell the user why."""
 
 
 ELEVATION_MESSAGE = (
     "the agent's process cannot be inspected from this one; it probably runs at another "
-    "elevation level (elevated while this process is not, or the reverse): nothing is sent to it, "
-    "only the path check runs. Run git and `nbp-git-safe unlock` from the same kind of terminal"
+    "elevation level (elevated while this process is not, or the reverse): nothing is sent to it "
+    "and the content check cannot run. Run git and `nbp-git-safe unlock` from the same kind of "
+    "terminal"
 )
 
 
@@ -873,6 +874,7 @@ class AgentServer:
         self._listener: Any = None
         self._started = 0.0
         self._expires_at = 0.0
+        self._mono_deadline = 0.0
         self._last_activity = 0.0
         self.info: AgentInfo | None = None
 
@@ -889,6 +891,10 @@ class AgentServer:
         now = time.time()
         self._started = self._last_activity = now
         self._expires_at = now + self.ttl
+        # The TTL also runs on the monotonic clock: setting the wall clock back never extends it
+        # (the wall-clock deadline stays, so time spent suspended still counts where the
+        # monotonic clock stops during sleep). The earlier of the two ends the agent.
+        self._mono_deadline = time.monotonic() + self.ttl
         self.info = AgentInfo(
             address=endpoint.address,
             family=endpoint.family,
@@ -963,10 +969,13 @@ class AgentServer:
         with contextlib.suppress(Exception):
             connect_raw(self.info.address, self.info.family).close()
 
+    def _expired(self) -> bool:
+        return time.time() >= self._expires_at or time.monotonic() >= self._mono_deadline
+
     def _watchdog(self) -> None:
         while not self._stopping.wait(0.05):
             now = time.time()
-            if now >= self._expires_at:
+            if self._expired():
                 self.shutdown("ttl")
             elif self.idle_timeout is not None and now - self._last_activity >= self.idle_timeout:
                 self.shutdown("idle")
@@ -1006,7 +1015,7 @@ class AgentServer:
         if len(data) < 2 or data[0] != PROTO:
             return self._error("bad_request")
         op, body = data[1], data[2:]
-        if time.time() >= self._expires_at:
+        if self._expired():
             return self._error("expired")
         with self._lock:
             if op not in _OPS_NO_ACTIVITY:

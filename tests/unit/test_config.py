@@ -125,6 +125,7 @@ def test_repr_hides_key_command(repo_git: tuple[Repo, Git, IsolatedGit]) -> None
         ("idleTimeout", "x"),
         ("onMissing", "explode"),
         ("padBucket", "0"),
+        ("padBucket", "1"),  # no padding at all (audit agy 2026-10-10, finding 7)
         ("padBucket", "abc"),
         ("padBucket", str(2**21)),
         ("vaultRef", "refs/heads/main"),
@@ -148,6 +149,16 @@ def test_invalid_values_are_rejected(
     _set(ig, repo, f"nbp-safe.{key}", value)
     with pytest.raises(ConfigError):
         load_config(git, repo, env={})
+
+
+def test_a_bucket_of_one_is_refused_from_every_layer(
+    repo_git: tuple[Repo, Git, IsolatedGit],
+) -> None:
+    repo, git, _ = repo_git
+    for flags, env in (({"padbucket": "1"}, {}), ({}, {"NBP_SAFE_PADBUCKET": "1"})):
+        with pytest.raises(ConfigError, match="padding off"):
+            load_config(git, repo, flags, env=env)
+    assert load_config(git, repo, {"padbucket": "2"}, env={}).pad_bucket == 2
 
 
 def test_error_messages_never_include_the_value(repo_git: tuple[Repo, Git, IsolatedGit]) -> None:

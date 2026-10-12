@@ -395,7 +395,12 @@ def test_purge_marker_is_cleared_once_origin_has_our_history(hooked: Env) -> Non
     remote_tip = remote_refs(hooked)["refs/heads/nbp-safe"]
     assert repo.cli("purge", target, "--confirm", "purge nbp-safe").code == 0
     assert (repo.state_dir / multi.PURGED_FILE).exists()
-    repo.sh("push", f"--force-with-lease=refs/heads/nbp-safe:{remote_tip}", "origin", "nbp-safe")
+    lease = f"--force-with-lease=refs/heads/nbp-safe:{remote_tip}"
+    first = repo.raw("push", lease, "origin", "nbp-safe")
+    if first.returncode != 0:  # pre-push sealed a new vault commit: it refuses, the rerun sends it
+        assert "run `git push` again" in first.stderr, first.stderr
+        repo.sh("push", lease, "origin", "nbp-safe")
+    assert remote_refs(hooked)["refs/heads/nbp-safe"] == hooked.tip()
     assert repo.cli("sync", "--no-open").code == 0
     assert not (repo.state_dir / multi.PURGED_FILE).exists()
 

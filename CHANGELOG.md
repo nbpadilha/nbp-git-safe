@@ -4,6 +4,24 @@ All notable changes. The format follows "Keep a Changelog"; versions follow SemV
 
 ## Unreleased
 
+### Security (independent audit of 2026-10-10)
+
+- Unattended runs (stderr not a terminal, `CI`, or `NBP_SAFE_NONINTERACTIVE=1`) no longer end
+  "green" with a stale vault: with the agent locked or expired, `post-commit` prints an ERROR and
+  exits non-zero, and `pre-push` refuses the push. At a terminal the warning-only behaviour stays.
+- `pre-push` refuses a push whose vault commit its own seal made stale (git would have sent the old
+  one and reported success); run `git push` again.
+- An agent that cannot be inspected (Windows, another elevation level) makes `pre-commit` and
+  `pre-push` refuse instead of skipping the content check with a warning.
+- A vault tree with `store/` blobs the authenticated index does not reference is refused.
+- git and the keyCommand get an allow-listed environment; `OP_*` reaches only a keyCommand that is
+  `op` (or names listed in `NBP_SAFE_PASS_ENV`). An unattended keyCommand failure quotes a short,
+  redacted tail of its stderr.
+- `pad.bucket` below 2 (no padding) is refused from every configuration layer.
+- The agent's TTL also runs on the monotonic clock: setting the wall clock back does not extend it.
+- README: limitations of deterministic encryption, the 64 MiB file limit, `os.replace` on Windows,
+  key material in `bytes`, and what the push guard does not decrypt.
+
 ### Fixed
 
 - The package metadata said 0.1.0 while this changelog and the `v0.1.1` tag said 0.1.1:

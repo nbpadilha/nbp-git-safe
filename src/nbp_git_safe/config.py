@@ -158,6 +158,9 @@ VERSIONED_KEYS = {
 # (a collaborator's commit must not weaken padding or timestamp rounding). ``onMissing`` decides
 # whether a file deleted locally is deleted from the vault, so only the local config may set it.
 MIN_VERSIONED_BUCKET = 1024
+# A bucket of 1 is no padding at all (the exact size of every file shows on the remote): refused
+# from the local config, the environment and the flags too (audit agy 2026-10-10, finding 7).
+MIN_BUCKET = 2
 MIN_VERSIONED_GRANULARITY = 60
 _VERSIONED_FLOORS = {
     "padbucket": MIN_VERSIONED_BUCKET,
@@ -256,6 +259,11 @@ def load_config(
                 if layer is versioned and floor is not None and values[name] < floor:
                     values[name] = floor
                     raised.append(name)
+                if name == "padbucket" and values[name] < MIN_BUCKET:
+                    raise ConfigError(
+                        f"pad.bucket: 1 turns padding off (exact file sizes become visible on the "
+                        f"remote); use {MIN_BUCKET} or more (default 4096)"
+                    )
                 break
     return Config(
         key_command=values.get("keycommand"),
