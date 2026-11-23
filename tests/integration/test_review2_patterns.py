@@ -100,7 +100,8 @@ def test_h1_negation_upstream_locked_agent_existing_files_are_not_published(  # 
     repo.write("notes.txt", "x\n")
     repo.sh("add", "notes.txt")
     assert commit(repo, "work").returncode == 0
-    assert repo.raw("push", "-q", "origin", "main").returncode == 0
+    interactive = {"NBP_SAFE_NONINTERACTIVE": "0"}  # locked + unattended refuses (audit agy, 1)
+    assert repo.raw("push", "-q", "origin", "main", env=interactive).returncode == 0
     assert_remote_clean(hooked)
     assert "refs/heads/main" in remote_refs(hooked)
 

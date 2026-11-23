@@ -360,6 +360,16 @@ def test_ttl_expiry_stops_and_cleans_up(agent_thread: Callable[..., ThreadAgent]
         agent.AgentClient.connect(ta.state_dir)
 
 
+def test_setting_the_wall_clock_back_does_not_extend_the_ttl(
+    agent_thread: Callable[..., ThreadAgent], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex lead (audit 2026-10-10): the TTL also runs on the monotonic clock."""
+    real = time.time
+    ta = agent_thread(ttl=0.6)
+    monkeypatch.setattr(time, "time", lambda: real() - 3600)  # the clock jumped an hour back
+    assert _wait(ta.exited)
+
+
 def test_expired_agent_answers_expired_before_exit(
     agent_thread: Callable[..., ThreadAgent],
 ) -> None:

@@ -6,6 +6,11 @@ in the foreground CLI process WITHOUT a shell (so interactive prompts such as a 
 manager's biometric dialog can appear), with a timeout, and its stdout must be the base64 of the
 64-byte master key. The key is delivered to the agent over the authenticated channel; it is never
 placed in argv, the environment, a file, a log or an error message.
+
+The command gets an allow-listed environment (``gitutil.key_command_env``): ``OP_*`` variables only
+when it is ``op`` itself (or when named in ``NBP_SAFE_PASS_ENV``). Its stderr goes to the terminal
+when a person is there (a password manager may prompt on it); in an unattended run it is captured,
+and only a short REDACTED tail of it is quoted in the error when the command fails.
 """
 
 from __future__ import annotations
@@ -23,10 +28,41 @@ from typing import Any
 from nbp_git_safe import agent, crypto, gitutil, keyid
 
 MAX_KEY_OUTPUT = 4096
+MAX_ERROR_QUOTE = 300
+# Anything that looks like a token, a key or a long id: 20+ characters of a base64/base64url/hex
+# alphabet. Over-redacting an error message is harmless; quoting a credential is not.
+_SECRETISH = re.compile(r"[A-Za-z0-9+/_-]{20,}=*")
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off")
+
+
+def non_interactive() -> bool:
+    """Is this process running unattended? ``NBP_SAFE_NONINTERACTIVE`` decides when set; otherwise
+    a set ``CI`` or a stderr that is not a terminal means nobody is there to read a message."""
+    flag = os.environ.get("NBP_SAFE_NONINTERACTIVE", "").strip().lower()
+    if flag in _TRUE:
+        return True
+    if flag in _FALSE:
+        return False
+    if os.environ.get("CI", "").strip().lower() not in ("", *_FALSE):
+        return True
+    try:
+        return not sys.stderr.isatty()
+    except (AttributeError, ValueError, OSError):
+        return True
+
+
+def redact(text: str) -> str:
+    """A short, redacted tail of a child's stderr, safe to put in an error message or a log."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    tail = " | ".join(lines[-3:])
+    tail = _SECRETISH.sub("[redacted]", tail)
+    return tail[-MAX_ERROR_QUOTE:]
 
 
 class KeyCommandError(Exception):
-    """keyCommand could not produce a valid key. Messages never include its output."""
+    """keyCommand could not produce a valid key. Messages never include its stdout; a failure of
+    an unattended run quotes a short, redacted tail of its stderr."""
 
 
 _kill_tree = gitutil.kill_tree
@@ -76,6 +112,9 @@ def run_key_command(
     kwargs: dict[str, Any] = gitutil.window_flags()
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
+    capture = non_interactive()
+    if capture:  # unattended: whatever it prints goes nowhere but a redacted error message
+        kwargs["stderr"] = subprocess.PIPE
     try:
         program = gitutil.resolve_executable(argv[0], avoid=avoid)  # never from the cwd
         if cwd is not None and os.path.dirname(program) and not os.path.isabs(program):
@@ -84,7 +123,7 @@ def run_key_command(
         proc = subprocess.Popen(  # noqa: S603 - argv list from the local .git/config, no shell
             command,
             cwd=cwd,
-            env=gitutil.child_env(os.environ),
+            env=gitutil.key_command_env(argv[0], os.environ),
             shell=False,
             stdout=subprocess.PIPE,
             **kwargs,
@@ -94,9 +133,9 @@ def run_key_command(
     except OSError:
         raise KeyCommandError("keyCommand could not be started") from None
     timed_out = False
-    out = b""
+    out = err = b""
     try:
-        out, _ = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_tree(proc)
@@ -110,7 +149,9 @@ def run_key_command(
         raise KeyCommandError(f"keyCommand timed out after {timeout:g} s")
     if proc.returncode != 0:
         out = b""
-        raise KeyCommandError(f"keyCommand failed (exit code {proc.returncode})")
+        said = redact((err or b"").decode("utf-8", "replace")) if capture else ""
+        detail = f": {said}" if said else ""
+        raise KeyCommandError(f"keyCommand failed (exit code {proc.returncode}){detail}")
     if len(out) > MAX_KEY_OUTPUT:
         out = b""
         raise KeyCommandError("keyCommand output is not a valid key")

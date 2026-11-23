@@ -147,14 +147,19 @@ def test_post_commit_seals_and_survives_errors(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(vault, "seal", explode)
+    monkeypatch.setenv("NBP_SAFE_NONINTERACTIVE", "0")  # a person at a terminal: a warning
     assert hooks.run_hook("post-commit", []) == 0
-    assert "could not seal after the commit" in capsys.readouterr().err
+    assert "warning: could not seal after the commit" in capsys.readouterr().err
+    monkeypatch.setenv("NBP_SAFE_NONINTERACTIVE", "1")  # unattended: an error and a non-zero exit
+    assert hooks.run_hook("post-commit", []) == 1
+    assert "ERROR: could not seal after the commit" in capsys.readouterr().err
 
 
 def test_post_commit_locked_hints_only_when_protected_files_exist(
-    inside: Env, capsys: pytest.CaptureFixture[str]
+    inside: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     inside.agent.stop()
+    monkeypatch.setenv("NBP_SAFE_NONINTERACTIVE", "0")
     assert hooks.run_hook("post-commit", []) == 0
     assert "not sealed" in capsys.readouterr().err
     repo = inside.repo
@@ -162,6 +167,9 @@ def test_post_commit_locked_hints_only_when_protected_files_exist(
         for path in sorted((repo.path / sub).rglob("*")):
             if path.is_file() and path.name != "keep-public.txt":
                 path.unlink()
+    assert hooks.run_hook("post-commit", []) == 0
+    assert capsys.readouterr().err == ""
+    monkeypatch.setenv("NBP_SAFE_NONINTERACTIVE", "1")  # nothing protected: nothing to fail on
     assert hooks.run_hook("post-commit", []) == 0
     assert capsys.readouterr().err == ""
 

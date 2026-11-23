@@ -164,7 +164,9 @@ def run_in_child(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             cwd=_neutral_directory(),
-            env=gitutil.child_env(os.environ),
+            # allow-listed, but WITH ``OP_*``: this child runs the key commands, and each one is
+            # filtered again by ``gitutil.key_command_env`` (only ``op`` itself gets ``OP_*``)
+            env={**gitutil.minimal_env(os.environ, op="all"), gitutil.NO_CWD_EXE: "1"},
             **kwargs,
         )
     except OSError:
