@@ -23,7 +23,10 @@ from tests.integration.fleetkit import MakeRepo, repo_named, run
 def rmtree_hard(path: Path) -> None:
     """``shutil.rmtree`` that also removes read-only files (git's object files are, on Windows)."""
     for root, dirs, files in os.walk(path):
-        for name in (*dirs, *files):
+        for name in dirs:  # (a directory also needs its search bit to be walked on POSIX)
+            with contextlib.suppress(OSError):
+                os.chmod(os.path.join(root, name), stat.S_IRWXU)
+        for name in files:
             with contextlib.suppress(OSError):
                 os.chmod(os.path.join(root, name), stat.S_IWRITE | stat.S_IREAD)
     shutil.rmtree(path)
