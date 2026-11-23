@@ -58,7 +58,27 @@ _ADMINS = "S-1-5-32-544"
 _SYSTEM = "S-1-5-18"
 _CREATOR = "S-1-3-0"
 _OWNER_RIGHTS = "S-1-3-4"
+_TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 _ALIASES = {"SY": _SYSTEM, "BA": _ADMINS, "CO": _CREATOR, "OW": _OWNER_RIGHTS}
+_GROUP_NAMES = {
+    "WD": "Everyone",
+    "AU": "Authenticated Users",
+    "BU": "Users",
+    "IU": "Interactive users",
+    "PU": "Power Users",
+}
+# SDDL right codes (and access-mask bits) that let an account change a file or a folder
+_WRITE_CODES = {"GA", "GW", "FA", "FW", "WD", "WO", "SD", "DC", "CC", "WP", "DT"}
+_WRITE_MASK = (
+    0x2  # FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x4  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x40  # FILE_DELETE_CHILD
+    | 0x10000  # DELETE
+    | 0x40000  # WRITE_DAC
+    | 0x80000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
 _DOMAIN_SID = re.compile(r"^(S-1-5-21-\d+-\d+-\d+)-(\d+)$")
 _LOCAL_ADMIN_RID = "500"
 _ACE_RE = re.compile(r"\(([^()]*)\)")
@@ -277,6 +297,86 @@ def _dacl_problem(dacl_sddl: str, me: str) -> str | None:
         if _resolve_trustee(trustee, me_sid) not in allowed:
             return "the ACL grants access to another account"
     return None
+
+
+def _grants_write(rights: str) -> bool:
+    """Does an SDDL rights field (``FA``, ``0x1301bf``, ``GRGW`` ...) include a way to change?"""
+    text = rights.strip()
+    if text.lower().startswith("0x"):
+        try:
+            return bool(int(text, 16) & _WRITE_MASK)
+        except ValueError:
+            return True  # unreadable: not assumed safe
+    return any(text[i : i + 2].upper() in _WRITE_CODES for i in range(0, len(text), 2))
+
+
+def _dacl_write_problem(dacl_sddl: str, me: str) -> str | None:
+    """Does the DACL let an account other than the current user, SYSTEM, Administrators,
+    TrustedInstaller (and CREATOR OWNER / OWNER RIGHTS) change the object? Read access for others
+    is normal (a program under ``Program Files`` is readable by everyone) and is not reported."""
+    me_sid = me.upper()
+    allowed = {me_sid, _SYSTEM, _ADMINS, _CREATOR, _OWNER_RIGHTS, _TRUSTED_INSTALLER}
+    local_admin = _local_admin_sid(me_sid)
+    if local_admin:
+        allowed.add(local_admin)
+    for match in _ACE_RE.finditer(dacl_sddl):
+        fields = match.group(1).split(";")
+        if len(fields) < 6:
+            return "unrecognised ACL entry"
+        kind, rights, trustee = fields[0], fields[2], fields[5]
+        if kind not in _ALLOW_TYPES or not _grants_write(rights):
+            continue
+        resolved = _resolve_trustee(trustee, me_sid)
+        if resolved not in allowed:
+            who = _GROUP_NAMES.get(trustee.strip().upper(), "another account")
+            return f"can be changed by {who}"
+    return None
+
+
+def write_exposure(path: str | os.PathLike[str]) -> str | None:
+    """Why ``path`` (a file or a folder) can be changed by someone other than the current user,
+    SYSTEM, Administrators and TrustedInstaller, or ``None``. A program started at every login is
+    only as trustworthy as who can replace it (or what sits next to it); a link is followed."""
+    real = os.path.realpath(path)
+    if not os.path.lexists(real):
+        return "does not exist"
+    advapi, kernel = _dll("advapi32"), _dll("kernel32")
+    owner, dacl, descriptor = _PTR(), _PTR(), _PTR()
+    code = advapi.GetNamedSecurityInfoW(
+        real,
+        _SE_FILE_OBJECT,
+        _OWNER_INFO | _DACL_INFO,
+        ctypes.byref(owner),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if code != 0:
+        return "its security information cannot be read"
+    try:
+        me = current_user_sid()
+        if not owner or _sid_to_string(owner.value or 0) not in (
+            me,
+            _ADMINS,
+            _SYSTEM,
+            _TRUSTED_INSTALLER,
+        ):
+            return "is owned by another account"
+        if not dacl:
+            return "has no access control list (everyone can change it)"
+        text = wintypes.LPWSTR()
+        ok = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, _DACL_INFO, ctypes.byref(text), None
+        )
+        if not ok:
+            return "its access control list cannot be read"
+        try:
+            return _dacl_write_problem(str(text.value), me)
+        finally:
+            kernel.LocalFree(ctypes.cast(text, _PTR))
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 def private_dir_problem(path: str | os.PathLike[str]) -> str | None:

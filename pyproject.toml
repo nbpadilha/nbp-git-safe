@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nbp-git-safe"
-version = "0.1.1"
+version = "0.2.0"
 description = "Encrypted, name-hiding vault for sensitive files inside a Git repository."
 readme = "README.md"
 license = "MIT"
@@ -64,6 +64,7 @@ include = [
   "/docs/GUARD.md",
   "/docs/MULTI.md",
   "/docs/RELEASING.md",
+  "/docs/TRAY.md",
   "/CHANGELOG.md",
   "/CONTRIBUTING.md",
   "/LICENSE",
@@ -106,5 +107,5 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 # asserts in these modules only narrow types for the checker; none guards security.
-"src/nbp_git_safe/{agent,cli,vault,multi}.py" = ["S101"]
+"src/nbp_git_safe/{agent,cli,vault,multi,registry,trayconfig,traylog,fleetops,traycontroller,tray_win}.py" = ["S101"]
 "tests/**" = ["S101", "S603", "S607", "S105", "S106"]

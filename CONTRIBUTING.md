@@ -33,6 +33,31 @@ configuration (`GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM`). They never touch the 
   `# SPDX-License-Identifier: MIT` line at the top of every Python file.
 * Commit messages in English, imperative mood, one logical change per commit.
 
+## Platform ports (macOS, Linux)
+
+A tray front end for another platform is a good contribution, by pull request or as a fork you
+maintain. The design is in [docs/TRAY.md](docs/TRAY.md) (its section 7 is the checklist): the window
+layer only drives `traycontroller.TrayController`; the decisions live in `fleet.py` and `fleetops.py`
+and are shared. Rules: no new runtime dependency without a discussion first (an optional extra for a
+toolkit is the way), the same invariants (no key outside the agent hand-off, no command from a
+versioned file or from the registry, fail closed, no network beyond the opt-in push), the SPDX header,
+placeholders instead of real names. Say in the pull request what you ran it on and what you could not
+try.
+
+Testing the neutral layer needs no desktop and runs everywhere:
+
+```
+uv run pytest -q --no-cov tests/unit/test_registry.py tests/unit/test_fleet.py tests/unit/test_traycontroller.py
+uv run pytest -q --no-cov tests/integration/test_fleet.py tests/integration/test_tray_controller.py
+```
+
+`tests/unit/test_traycontroller.py` shows how to drive the controller with fake operations, an
+injected clock and inline workers, which is also how to test a new front end's logic without a window.
+The Windows-only tests (`tests/integration/test_tray_win.py`, the `Run` value in
+`tests/unit/test_autostart.py`) are skipped on other systems and skip themselves without a desktop;
+the `Run` test uses a throw-away key, never the real one. Tests never write to the real per-user
+directory (the shared fixtures set `NBP_SAFE_RUNTIME_DIR`, and a test that escapes fails on purpose).
+
 ## Licence policy
 
 The project is MIT. Contributions are accepted under MIT.

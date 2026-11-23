@@ -216,3 +216,21 @@ def test_spawn_does_not_pass_the_key_in_argv_or_env(
     argv = seen["argv"]
     assert isinstance(argv, list) and "--idle" in argv
     assert argv[1:4] == ["-I", "-m", "nbp_git_safe.agent"]
+
+
+def test_a_refused_key_command_keeps_no_trace_of_what_it_printed(master_key: bytes) -> None:
+    """A command that prints a VALID key and then fails: the exception (and so its traceback, which
+    keeps the frames alive) must not hold what it printed (review, informational)."""
+    needle = crypto.encode_key(master_key).encode()
+    with pytest.raises(unlock.KeyCommandError) as caught:
+        unlock.run_key_command(_cmd("exit1"), 30)
+    frame = caught.value.__traceback__
+    seen = 0
+    while frame is not None:
+        if frame.tb_frame.f_globals["__name__"] == unlock.__name__:  # not this test's own frame
+            seen += 1
+            for value in frame.tb_frame.f_locals.values():
+                if isinstance(value, bytes | bytearray):
+                    assert needle not in bytes(value)
+        frame = frame.tb_next
+    assert seen >= 1  # the runner's frame was among them, and holds no key

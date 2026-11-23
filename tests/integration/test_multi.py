@@ -369,6 +369,17 @@ def git_calls(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
         return real(args, *a, **kw)
 
     monkeypatch.setattr("nbp_git_safe.gitutil.subprocess.run", spy)
+
+    class SpyPopen(subprocess.Popen):  # type: ignore[type-arg]
+        """A push now runs under a hard time limit, which means through ``Popen`` (so that the
+        whole process tree can be killed), not through ``subprocess.run``: spy on that too."""
+
+        def __init__(self, args, *a, **kw):  # type: ignore[no-untyped-def]
+            if isinstance(args, list):
+                calls.append([str(x) for x in args])
+            super().__init__(args, *a, **kw)
+
+    monkeypatch.setattr("nbp_git_safe.gitutil.subprocess.Popen", SpyPopen)
     yield calls
 
 

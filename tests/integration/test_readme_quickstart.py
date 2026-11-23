@@ -31,7 +31,12 @@ from tests.conftest import IsolatedGit
 from tests.helpers import NbpRepo
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCS = [ROOT / "README.md", ROOT / "docs" / "GUARD.md", ROOT / "docs" / "MULTI.md"]
+DOCS = [
+    ROOT / "README.md",
+    ROOT / "docs" / "GUARD.md",
+    ROOT / "docs" / "MULTI.md",
+    ROOT / "docs" / "TRAY.md",
+]
 PROG = "nbp-git-safe"
 YEAR = time.gmtime().tm_year
 
