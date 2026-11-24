@@ -13,7 +13,9 @@ on:
 permissions:
   contents: read
 
-# Nova execucao no mesmo ref cancela a anterior em PR e em branch ci-*; em main nada e cancelado.
+# Nova execucao no mesmo ref cancela a anterior em PR e em branch ci-*. Em main nenhuma rodada em andamento
+# e cancelada, mas uma rodada ainda na fila pode ser substituida pela mais nova (dois pushes seguidos podem
+# pular a do meio).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/ci-') }}
