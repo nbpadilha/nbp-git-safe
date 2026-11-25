@@ -1266,20 +1266,32 @@ def _agent_environment() -> dict[str, str]:
     return {"PATH": "/usr/bin:/bin"}
 
 
+def _agent_executables() -> list[str]:
+    """Interpreters to try, in order. On Windows, Application Control (e.g. Smart App Control)
+    can block ``pythonw.exe`` alone while ``python.exe`` still runs, so the windowless
+    interpreter is a preference: ``python.exe`` runs windowless anyway under ``DETACHED_PROCESS``.
+    """
+    exe = str(Path(sys.executable))
+    if sys.platform != "win32":
+        return [exe]
+    windowless = str(Path(sys.executable).with_name("pythonw.exe"))
+    if windowless == exe or not Path(windowless).is_file():
+        return [exe]
+    return [windowless, exe]
+
+
 def _agent_executable() -> str:
-    exe = Path(sys.executable)
-    if sys.platform == "win32":
-        pythonw = exe.with_name("pythonw.exe")
-        if pythonw.is_file():
-            return str(pythonw)
-    return str(exe)
+    return _agent_executables()[0]
 
 
-def _agent_argv(state_dir: Path, ttl: float, idle_timeout: float | None) -> list[str]:
+def _agent_argv(
+    state_dir: Path, ttl: float, idle_timeout: float | None, executable: str | None = None
+) -> list[str]:
     """``-I``: isolated mode (no ``PYTHON*`` variables, no user site, and neither the current
     directory nor the script directory on ``sys.path``), so nothing planted next to the caller can
     be imported into the process that holds the key."""
-    argv = [_agent_executable(), "-I", "-m", "nbp_git_safe.agent", "--state-dir", str(state_dir)]
+    argv = [executable or _agent_executable(), "-I", "-m", "nbp_git_safe.agent"]
+    argv += ["--state-dir", str(state_dir)]
     argv += ["--runtime-root", str(runtime_root()), "--ttl", repr(float(ttl))]
     if idle_timeout is not None:
         argv += ["--idle", repr(float(idle_timeout))]
@@ -1324,6 +1336,8 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
     state_dir = Path(state_dir)
     endpoint = new_endpoint(state_dir)  # creates and verifies the private state directory
     rdir = runtime_path(state_dir)
+    candidates: list[str] = _agent_executables()
+    proc: subprocess.Popen[bytes] | None = None
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
@@ -1332,16 +1346,29 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
         )
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-        _agent_argv(state_dir, ttl, idle_timeout),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        cwd=rdir,
-        env=_agent_environment(),
-        **kwargs,
-    )
+    for index, interpreter in enumerate(candidates):
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                _agent_argv(state_dir, ttl, idle_timeout, executable=interpreter),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                cwd=rdir,
+                env=_agent_environment(),
+                **kwargs,
+            )
+            break
+        except OSError:
+            if index + 1 >= len(candidates):
+                if sys.platform == "win32":
+                    raise AgentError(
+                        "key agent could not be started "
+                        "(Windows Application Control may block the Python interpreter;"
+                        " run `nbp-git-safe doctor` to check the agent interpreter)"
+                    ) from None
+                raise AgentError("key agent could not be started") from None
+    assert proc is not None
     try:
         assert proc.stdin is not None
         proc.stdin.write(endpoint.to_handoff())
