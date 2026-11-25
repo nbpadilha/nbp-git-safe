@@ -218,7 +218,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if args.all:
         return fleetcli.run_all("doctor", args)
     repo, git, cfg = _context(args)
-    findings = doctor.run_doctor(git, repo, cfg)
+    findings = doctor.run_doctor(git, repo, cfg, probe_pythonw=True)
     for finding in findings:
         _out(
             f"[{finding.level.upper() if finding.level == doctor.PROBLEM else finding.level}] "
