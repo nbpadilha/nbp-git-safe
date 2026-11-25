@@ -13,21 +13,25 @@ and Windows robustness.
   set for children only, while `CreateProcess` reads it from the calling process. The process now
   sets it at start-up (medium).
 - The unlock guard took over a lock older than 180 s although `keyCommand` may run up to 3600 s,
-  so two unlocks could run at once and start two agents. It is now an operating-system lock,
-  released only when its holder ends (medium).
+  so two unlocks could run at once and start two agents. It is now an operating-system lock on a
+  new file (`unlock.oslock`), released only when its holder ends; a real I/O error on it is
+  reported as such, not as "another unlock is in progress" (medium). The 0.2.0 lock file is not
+  seen: the guard holds only between 0.2.1 processes (do not mix versions on one machine).
 - The redacted stderr quote of a failing unattended `keyCommand` kept the short last line of a
   wrapped base64 key; 8+ character tokens holding a digit or `=` padding are now redacted (low).
+  Known limit: a token of 8 to 19 characters with no digit and no padding is still quoted.
 - With `autoUnlock` on, an agent that cannot be inspected (another elevation level) lost its
   reason through the failed auto-unlock and the hooks only warned; they refuse again (low).
 
 ### Windows
-- When Application Control or Smart App Control blocks `pythonw.exe` (WinError 4551), the key
-  agent starts with `python.exe` (still without a window) instead of failing after the password
-  manager already released the key.
+- When a Windows policy blocks `pythonw.exe` (Code Integrity / WDAC / Smart App Control, e.g.
+  WinError 4551; AppLocker or Software Restriction, WinError 1260/786), the key agent starts with
+  `python.exe` (still without a window) instead of failing after the password manager already
+  released the key. Any other start failure is reported with its cause and no fallback.
 - `doctor` reports a hook interpreter that does not exist, an App Execution Alias (`WindowsApps`)
   or a Python inside an app's virtualised folder (`Packages/.../LocalCache`), and, in the
-  single-repository `doctor`, whether Windows blocks `pythonw.exe` (the tray and `autostart`
-  need it).
+  single-repository `doctor`, whether Windows blocks `pythonw.exe`, at creation or by an
+  immediate abnormal exit (the tray and `autostart` need it).
 
 ## 0.2.0 - 2026-10-05
 
