@@ -72,6 +72,58 @@ def test_spawn_falls_back_to_python_exe(tmp_path: Path, monkeypatch: pytest.Monk
     assert calls[1][1:4] == ["-I", "-m", "nbp_git_safe.agent"]
 
 
+def test_spawn_falls_back_on_policy_block_1260(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_spawn_setup(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+
+    def fake_popen(argv: list[str], *args: object, **kwargs: object) -> object:
+        calls.append(argv)
+        if argv[0].endswith("pythonw.exe"):
+            raise OSError(2, "blocked by policy", None, 1260)
+        raise _Started()
+
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    with pytest.raises(_Started):
+        agent.spawn_agent(tmp_path / "s", 60.0, None)
+    assert [argv[0] for argv in calls] == ["C:/x/pythonw.exe", "C:/x/python.exe"]
+
+
+def test_spawn_does_not_fallback_on_plain_file_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_spawn_setup(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+
+    def fake_popen(argv: list[str], *args: object, **kwargs: object) -> object:
+        calls.append(argv)
+        raise OSError(2, "not found here", None, 2)
+
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    with pytest.raises(agent.AgentError) as excinfo:
+        agent.spawn_agent(tmp_path / "s", 60.0, None)
+    assert len(calls) == 1
+    assert "not found here" in str(excinfo.value)
+
+
+def test_spawn_does_not_fallback_on_posix_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_spawn_setup(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+
+    def fake_popen(argv: list[str], *args: object, **kwargs: object) -> object:
+        calls.append(argv)
+        raise OSError(13, "denied")
+
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    with pytest.raises(agent.AgentError) as excinfo:
+        agent.spawn_agent(tmp_path / "s", 60.0, None)
+    assert len(calls) == 1
+    assert "denied" in str(excinfo.value)
+
+
 def test_spawn_raises_agent_error_when_every_interpreter_is_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

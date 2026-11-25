@@ -46,12 +46,30 @@ def test_pythonw_blocked_run_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     (tmp_path / "pythonw.exe").write_bytes(b"")
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
-    assert doctor.pythonw_blocked(lambda argv: None) is False
+    assert doctor.pythonw_blocked(lambda argv: 0) is False
+
+
+def test_pythonw_blocked_run_invalid_image_hash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "pythonw.exe").write_bytes(b"")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    assert doctor.pythonw_blocked(lambda argv: 0xC0000428) is True
+
+
+def test_pythonw_blocked_run_nonzero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "pythonw.exe").write_bytes(b"")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    assert doctor.pythonw_blocked(lambda argv: 1) is True
 
 
 def test_pythonw_blocked_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    assert doctor.pythonw_blocked(lambda argv: None) is None
+    assert doctor.pythonw_blocked(lambda argv: 0) is None
 
 
 def test_python_location_problem_levels(tmp_path: Path) -> None:

@@ -1266,6 +1266,15 @@ def _agent_environment() -> dict[str, str]:
     return {"PATH": "/usr/bin:/bin"}
 
 
+_POLICY_BLOCK_ERRORS = frozenset({786, 1260, *range(4550, 4600)})
+# 786 / 1260: Software Restriction Policies or AppLocker; 4550-4599: Code Integrity / WDAC /
+# Smart App Control.
+
+
+def _blocked_by_policy(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in _POLICY_BLOCK_ERRORS
+
+
 def _agent_executables() -> list[str]:
     """Interpreters to try, in order. On Windows, Application Control (e.g. Smart App Control)
     can block ``pythonw.exe`` alone while ``python.exe`` still runs, so the windowless
@@ -1359,15 +1368,20 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
                 **kwargs,
             )
             break
-        except OSError:
-            if index + 1 >= len(candidates):
-                if sys.platform == "win32":
-                    raise AgentError(
-                        "key agent could not be started "
-                        "(Windows Application Control may block the Python interpreter;"
-                        " run `nbp-git-safe doctor` to check the agent interpreter)"
-                    ) from None
-                raise AgentError("key agent could not be started") from None
+        except OSError as exc:
+            if _blocked_by_policy(exc) and index + 1 < len(candidates):
+                continue
+            if not _blocked_by_policy(exc):
+                raise AgentError(
+                    f"key agent could not be started: {exc.strerror or type(exc).__name__}"
+                ) from None
+            if sys.platform == "win32":
+                raise AgentError(
+                    "key agent could not be started "
+                    "(Windows Application Control may block the Python interpreter;"
+                    " run `nbp-git-safe doctor` to check the agent interpreter)"
+                ) from None
+            raise AgentError("key agent could not be started") from None
     assert proc is not None
     try:
         assert proc.stdin is not None
