@@ -16,6 +16,7 @@ from nbp_git_safe import (
     crypto,
     doctor,
     fleetcli,
+    gitutil,
     guard,
     hooks,
     keyid,
@@ -217,7 +218,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if args.all:
         return fleetcli.run_all("doctor", args)
     repo, git, cfg = _context(args)
-    findings = doctor.run_doctor(git, repo, cfg)
+    findings = doctor.run_doctor(git, repo, cfg, probe_pythonw=True)
     for finding in findings:
         _out(
             f"[{finding.level.upper() if finding.level == doctor.PROBLEM else finding.level}] "
@@ -848,6 +849,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] = ()) -> int:
+    gitutil.protect_process_env()
     parser = build_parser()
     try:
         args = parser.parse_args(list(argv))

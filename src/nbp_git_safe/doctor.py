@@ -9,8 +9,10 @@ repository, and nothing prints file names of protected content or any secret.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,6 +106,39 @@ def _vault_divergence(git: Git, repo: Repo, cfg: Config) -> Finding | None:
     return Finding(INFO, status.message + ("; run `nbp-git-safe sync`" if status.behind else ""))
 
 
+def pythonw_blocked(run: Callable[[list[str]], int | None] | None = None) -> bool | None:
+    """Whether plain ``pythonw.exe`` is refused by Application Control (True), runs (False) or
+    cannot be told (None). ``run`` replaces the probe spawn; it receives the exact argument vector
+    to reject and gives its exit code. A blocked image can either fail to start at all (OSError) or
+    start and die at once with an abnormal exit code, and both count as blocked; a timeout leaves
+    the question open."""
+    if sys.platform != "win32":
+        return None
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    if not pythonw.is_file():
+        return None
+    spawn = run if run is not None else _spawn_pythonw
+    try:
+        code = spawn([str(pythonw), "-I", "-c", ""])
+    except OSError:
+        return True
+    except subprocess.TimeoutExpired:
+        return None
+    return code not in (0, None)
+
+
+def _spawn_pythonw(argv: list[str]) -> int | None:
+    return subprocess.run(  # noqa: S603 - fixed argv, no shell
+        argv,
+        timeout=15,
+        creationflags=0x08000000,  # CREATE_NO_WINDOW
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode
+
+
 def run_doctor(
     git: Git,
     repo: Repo,
@@ -111,6 +146,7 @@ def run_doctor(
     environ: Mapping[str, str] | None = None,
     *,
     names: bool = True,
+    probe_pythonw: bool = False,
 ) -> list[Finding]:
     """The findings. With ``names=False`` (``doctor --all``, the tray) no path of a protected file
     and no pattern is printed, only counts and the instruction to run ``doctor`` inside the
@@ -145,6 +181,11 @@ def run_doctor(
             add(OK, f"hook {status.event}: {status.detail}")
         else:
             add(PROBLEM, f"hook {status.event}: {status.detail}")
+    installed = hooks.configured_python(git, "pre-commit")
+    if installed is not None:
+        location = hooks.python_location_problem(installed)
+        if location is not None:
+            add(location[0], location[1])
     if sorted(s.event for s in hooks.inspect_hooks(git, repo) if s.mechanism == "shim"):
         add(
             INFO,
@@ -333,6 +374,13 @@ def run_doctor(
     divergence = _vault_divergence(git, repo, cfg)
     if divergence:
         found.append(divergence)
+    if probe_pythonw and pythonw_blocked() is True:
+        add(
+            WARN,
+            "Windows cannot start pythonw.exe (Application Control or Smart App Control?): the "
+            "tray and `autostart` cannot run; when a policy is the cause, unlock starts the key "
+            "agent with python.exe instead",
+        )
     return found
 
 

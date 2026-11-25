@@ -32,6 +32,9 @@ MAX_ERROR_QUOTE = 300
 # Anything that looks like a token, a key or a long id: 20+ characters of a base64/base64url/hex
 # alphabet. Over-redacting an error message is harmless; quoting a credential is not.
 _SECRETISH = re.compile(r"[A-Za-z0-9+/_-]{20,}=*")
+# A wrapped base64 key also has a short LAST line the rule above cannot see; prose never holds a
+# digit or '=' padding in an 8+ character token, base64 output of a key does.
+_SHORTISH = re.compile(r"[A-Za-z0-9+/_-]{8,}=*")
 _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off")
 
@@ -52,11 +55,17 @@ def non_interactive() -> bool:
         return True
 
 
+def _short_token(match: re.Match[str]) -> str:
+    token = match.group(0)
+    return "[redacted]" if "=" in token or any(c.isdigit() for c in token) else token
+
+
 def redact(text: str) -> str:
     """A short, redacted tail of a child's stderr, safe to put in an error message or a log."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     tail = " | ".join(lines[-3:])
     tail = _SECRETISH.sub("[redacted]", tail)
+    tail = _SHORTISH.sub(_short_token, tail)
     return tail[-MAX_ERROR_QUOTE:]
 
 

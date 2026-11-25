@@ -167,26 +167,6 @@ def test_connect_to_unreachable_address_reports_not_running(tmp_path: Path) -> N
         agent.AgentClient.connect_info(info)
 
 
-def test_unlock_guard_survives_lock_file_vanishing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    lock = agent.private_dir(tmp_path, create=True) / agent.UNLOCK_LOCK  # type: ignore[operator]
-    lock.write_bytes(b"")
-    real_stat = Path.stat
-    calls = {"n": 0}
-
-    def flaky(self: Path, *args: object, **kwargs: object) -> os.stat_result:
-        if self == lock and calls["n"] == 0:
-            calls["n"] += 1
-            lock.unlink()
-            raise FileNotFoundError
-        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "stat", flaky)
-    with agent.unlock_guard(tmp_path):
-        pass
-
-
 def test_spawn_gives_up_when_agent_never_publishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

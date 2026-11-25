@@ -74,8 +74,8 @@ attacks on the `cryptography` library itself.
 * **Hostile working tree.** `git` and `keyCommand` are resolved to absolute paths outside the
   current directory and outside the repository tree (`PATH` entries inside the repository, such as
   a `node_modules/.bin` or a `bin/` of the project, are skipped; when nothing else is found the
-  bare name is used and the system search applies), and children get
-  `NoDefaultCurrentDirectoryInExePath=1`; the auxiliary git that matches patterns runs with an
+  bare name is used and the system search applies, without the current directory), and both this
+  process and its children run with `NoDefaultCurrentDirectoryInExePath=1`; the auxiliary git that matches patterns runs with an
   environment without the repository-binding variables and without the variables that inject
   configuration or programs (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`,
   `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH*`, `GIT_EDITOR`,
@@ -197,6 +197,20 @@ attacks on the `cryptography` library itself.
 * An external review of the format and the agent. Fuzzing of the index and blob parsers.
 * Blobs are whole files held in memory (limit 64 MiB each); no streaming and no delta compression.
 * No post-quantum consideration: AES-256-based, symmetric.
+* **Concurrent unlocks.** Since 0.2.1 one unlock per repository runs at a time, held by an
+  operating-system lock on `unlock.oslock` in the private state directory (released when its holder
+  ends; a contender is refused at once). 0.2.0 used another file (`unlock.lock`, taken by creation
+  and stale after 180 s), so the two versions do not see each other: the guarantee holds only
+  between 0.2.1 processes. Do not run both versions on one machine.
+* **Agent interpreter on Windows.** The agent starts under `pythonw.exe`; when Windows refuses
+  that image by policy (Code Integrity / WDAC / Smart App Control `ERROR_SYSTEM_INTEGRITY_*`,
+  AppLocker or Software Restriction), it starts under `python.exe` from the same folder, still
+  detached and without a window, with the same identity checks. Any other start failure is
+  reported as it is, with no fallback.
+* **Redaction of a failing keyCommand's stderr** (unattended runs only) hides tokens of 20+
+  base64-alphabet characters and tokens of 8+ that hold a digit or `=` padding. A token of 8 to 19
+  characters with neither (letters, `+`, `/`, `_`, `-` only) is still quoted; a key command that
+  prints its key to stderr can therefore leak a short fragment of it.
 
 ## 6. Operational advice that follows from the model
 
@@ -292,4 +306,5 @@ runtime dependency (the tray is `ctypes`). The agent, its channel and its checks
    `other-elevation` and sends nothing to it.
 6. **Console-less process.** The tray runs under `pythonw`; children (git, the key command) are
    started with `CREATE_NO_WINDOW`. A key command that must prompt in a console cannot work from the
-   tray.
+   tray. Where Windows blocks `pythonw.exe` the tray and `autostart` cannot run at all (the agent
+   itself falls back to `python.exe`, section 5); single-repository `doctor` reports it.

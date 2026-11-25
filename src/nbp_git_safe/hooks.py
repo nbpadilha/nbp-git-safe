@@ -119,6 +119,50 @@ def hook_command(event: str, python: str | None = None) -> str:
     return f"{posix_quote(python or hook_python())} -I -m nbp_git_safe hook {event}"
 
 
+_CONFIG_COMMAND_RE = re.compile(r"\A('(?:[^']|'\\'')*') -I -m nbp_git_safe hook ")
+
+_PYTHON_PROBLEMS = {
+    "windowsapps": (
+        "warn",
+        "the hooks run a Python App Execution Alias (WindowsApps); git's shell may fail to "
+        "start it: install Python from python.org and run `nbp-git-safe init` again",
+    ),
+    "localcache": (
+        "warn",
+        "the hooks run a Python inside an app's virtualised folder (Packages/.../LocalCache), "
+        "invisible to other programs: reinstall the tool from an ordinary terminal and run "
+        "`nbp-git-safe init` again",
+    ),
+    "missing": (
+        "problem",
+        "the Python the hooks run does not exist (moved, uninstalled, or visible only inside "
+        "another app); run `nbp-git-safe init` from an ordinary terminal",
+    ),
+}
+
+
+def python_location_problem(path: str) -> tuple[str, str] | None:
+    """Whether ``path`` is a Python the hook shell will not be able to run."""
+    folded = path.replace("\\", "/").casefold()
+    if "/windowsapps/" in folded:
+        return _PYTHON_PROBLEMS["windowsapps"]
+    if not os.path.isfile(path):
+        return _PYTHON_PROBLEMS["missing"]
+    if "/packages/" in folded and "/localcache/" in folded:
+        return _PYTHON_PROBLEMS["localcache"]
+    return None
+
+
+def configured_python(git: Git, event: str) -> str | None:
+    """The interpreter the installed ``event`` hook runs, or ``None`` when no config hook or
+    one that no longer matches our command line."""
+    values = _config_values(git, f"hook.{hook_name(event)}.command")
+    match = _CONFIG_COMMAND_RE.match(values[-1]) if values else None
+    if match is None:
+        return None
+    return match.group(1)[1:-1].replace("'\\''", "'")
+
+
 def shim_text(event: str, python: str | None = None) -> str:
     return (
         "#!/bin/sh\n"
@@ -322,12 +366,18 @@ def acquire_backend(repo: Repo, cfg: Config) -> tuple[agent.AgentClient | None, 
     for attempt in range(2):
         try:
             client = agent.AgentClient.connect(repo.state_dir)
+        except agent.ProcessInspectionError as exc:
+            # the agent runs at another elevation level: autoUnlock from this one cannot fix that
+            return None, str(exc)
         except agent.AgentError as exc:
             reason = str(exc)
         else:
             try:
                 client.key_id()
                 return client, ""
+            except agent.ProcessInspectionError as exc:
+                client.close()
+                return None, str(exc)
             except agent.AgentError as exc:
                 reason = str(exc)
                 client.close()

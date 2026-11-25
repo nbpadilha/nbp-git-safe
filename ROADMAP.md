@@ -8,12 +8,13 @@ Legend: **[ ]** open, **[~]** partly done, **[x]** done.
 
 ## 1. Before announcing 0.2.0
 
-- [ ] **Independent re-review of the delta since the last completed review.** Five adversarial reviews
-      are done (see `docs/MAINTAINER-NOTES.md`); the fifth covered the `ci-tray` delta and its findings
-      are fixed, but the fixes themselves (the registered key id, the working directory of
-      `keyCommand`, the time limits and the push lane, the tray's unlock in a child process, the
-      OS-level file lock) have had no review of their own. The POSIX review that was started as the
-      fourth was never finished and is still open.
+- [~] **Independent re-review of the delta since the last completed review.** Five adversarial reviews
+      are done (see `docs/MAINTAINER-NOTES.md`). The fixes of the fifth (the registered key id, the
+      working directory of `keyCommand`, the time limits and the push lane, the tray's unlock in a
+      child process, the OS-level file lock) and the 2026-10-10 audit were re-reviewed on Windows for
+      0.2.1: two medium and two low findings, fixed in 0.2.1 (see `CHANGELOG.md`). The 0.2.1 fixes
+      still need a review of their own, and the POSIX review that was started as the fourth was
+      never finished and is still open.
 - [ ] **Release `0.2.0` properly.** There was never a `0.1.1` tag (its changes ship in `0.2.0`); no
       tag exists for `0.2.0` either. Create it on the final commit, push it **by name**
       (`git push origin v0.2.0`, never `--tags`: the history carries the upstream project's tags),

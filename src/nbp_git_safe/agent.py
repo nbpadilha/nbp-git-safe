@@ -53,7 +53,7 @@ PROTO = 1
 STATE_VERSION = 2  # agent.json layout (v1 stored the authkey and lived inside .git)
 AGENT_JSON = "agent.json"
 SECRET_FILE = "agent.secret"  # noqa: S105 - a file name, not a secret
-UNLOCK_LOCK = "unlock.lock"
+UNLOCK_LOCK = "unlock.oslock"  # not the 0.2.0 "unlock.lock": 0.2.0 deleted its lock file
 RUNTIME_NAME = "nbp-git-safe"
 SECRET_LEN = 32
 AUTHKEY_LEN = 32
@@ -1266,20 +1266,41 @@ def _agent_environment() -> dict[str, str]:
     return {"PATH": "/usr/bin:/bin"}
 
 
+_POLICY_BLOCK_ERRORS = frozenset({786, 1260, *range(4550, 4600)})
+# 786 / 1260: Software Restriction Policies or AppLocker; 4550-4599: Code Integrity / WDAC /
+# Smart App Control.
+
+
+def _blocked_by_policy(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in _POLICY_BLOCK_ERRORS
+
+
+def _agent_executables() -> list[str]:
+    """Interpreters to try, in order. On Windows, Application Control (e.g. Smart App Control)
+    can block ``pythonw.exe`` alone while ``python.exe`` still runs, so the windowless
+    interpreter is a preference: ``python.exe`` runs windowless anyway under ``DETACHED_PROCESS``.
+    """
+    exe = str(Path(sys.executable))
+    if sys.platform != "win32":
+        return [exe]
+    windowless = str(Path(sys.executable).with_name("pythonw.exe"))
+    if windowless == exe or not Path(windowless).is_file():
+        return [exe]
+    return [windowless, exe]
+
+
 def _agent_executable() -> str:
-    exe = Path(sys.executable)
-    if sys.platform == "win32":
-        pythonw = exe.with_name("pythonw.exe")
-        if pythonw.is_file():
-            return str(pythonw)
-    return str(exe)
+    return _agent_executables()[0]
 
 
-def _agent_argv(state_dir: Path, ttl: float, idle_timeout: float | None) -> list[str]:
+def _agent_argv(
+    state_dir: Path, ttl: float, idle_timeout: float | None, executable: str | None = None
+) -> list[str]:
     """``-I``: isolated mode (no ``PYTHON*`` variables, no user site, and neither the current
     directory nor the script directory on ``sys.path``), so nothing planted next to the caller can
     be imported into the process that holds the key."""
-    argv = [_agent_executable(), "-I", "-m", "nbp_git_safe.agent", "--state-dir", str(state_dir)]
+    argv = [executable or _agent_executable(), "-I", "-m", "nbp_git_safe.agent"]
+    argv += ["--state-dir", str(state_dir)]
     argv += ["--runtime-root", str(runtime_root()), "--ttl", repr(float(ttl))]
     if idle_timeout is not None:
         argv += ["--idle", repr(float(idle_timeout))]
@@ -1324,6 +1345,8 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
     state_dir = Path(state_dir)
     endpoint = new_endpoint(state_dir)  # creates and verifies the private state directory
     rdir = runtime_path(state_dir)
+    candidates: list[str] = _agent_executables()
+    proc: subprocess.Popen[bytes] | None = None
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
@@ -1332,16 +1355,34 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
         )
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-        _agent_argv(state_dir, ttl, idle_timeout),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        cwd=rdir,
-        env=_agent_environment(),
-        **kwargs,
-    )
+    for index, interpreter in enumerate(candidates):
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                _agent_argv(state_dir, ttl, idle_timeout, executable=interpreter),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                cwd=rdir,
+                env=_agent_environment(),
+                **kwargs,
+            )
+            break
+        except OSError as exc:
+            if _blocked_by_policy(exc) and index + 1 < len(candidates):
+                continue
+            if not _blocked_by_policy(exc):
+                raise AgentError(
+                    f"key agent could not be started: {exc.strerror or type(exc).__name__}"
+                ) from None
+            if sys.platform == "win32":
+                raise AgentError(
+                    "key agent could not be started "
+                    "(Windows Application Control may block the Python interpreter;"
+                    " run `nbp-git-safe doctor` to check the agent interpreter)"
+                ) from None
+            raise AgentError("key agent could not be started") from None
+    assert proc is not None
     try:
         assert proc.stdin is not None
         proc.stdin.write(endpoint.to_handoff())
@@ -1370,32 +1411,22 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
 
 @contextlib.contextmanager
 def unlock_guard(state_dir: Path) -> Any:
-    """Serialize concurrent ``unlock`` calls with an exclusive lock file (stale after 3 min)."""
+    """Serialize concurrent ``unlock`` calls with an OS lock: held only while its holder lives, so
+    no lock is stale and a file left behind by a dead holder does not block anyone."""
     rdir = private_dir(state_dir, create=True)
     assert rdir is not None
     path = rdir / UNLOCK_LOCK
-    for _ in range(2):
+    # statefile imports agent, so it comes in here to avoid an import cycle
+    from nbp_git_safe import statefile
+
+    with contextlib.ExitStack() as stack:
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            try:
-                age = time.time() - path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > 180:
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
-                continue
+            stack.enter_context(statefile.file_lock(path, wait=0.0))
+        except statefile.LockBusyError:
             raise AgentError("another unlock is in progress") from None
-        os.close(fd)
-        break
-    else:  # pragma: no cover - lost the race twice
-        raise AgentError("another unlock is in progress")
-    try:
+        except statefile.StateFileError as exc:
+            raise AgentError(f"cannot take the unlock lock: {exc}") from None
         yield
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
 
 
 def deliver_key(

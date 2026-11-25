@@ -533,13 +533,91 @@ def test_unlock_guard_serializes(tmp_path: Path) -> None:
         pass
 
 
-def test_unlock_guard_clears_stale_lock(tmp_path: Path) -> None:
-    lock = tmp_path / agent.UNLOCK_LOCK
+def test_unlock_guard_ignores_leftover_file(tmp_path: Path) -> None:
+    lock = agent.private_dir(tmp_path, create=True) / agent.UNLOCK_LOCK  # type: ignore[operator]
     lock.write_bytes(b"")
     old = time.time() - 1000
     os.utime(lock, (old, old))
     with agent.unlock_guard(tmp_path):
         pass
+
+
+def test_unlock_guard_old_lock_still_held_blocks(tmp_path: Path) -> None:
+    lock = agent.private_dir(tmp_path, create=True) / agent.UNLOCK_LOCK  # type: ignore[operator]
+    with agent.unlock_guard(tmp_path):
+        old = time.time() - 1000
+        os.utime(lock, (old, old))
+        with (
+            pytest.raises(agent.AgentError, match="in progress"),
+            agent.unlock_guard(tmp_path),
+        ):
+            pass
+
+
+def test_unlock_guard_released_when_holder_dies(tmp_path: Path) -> None:
+    lock = agent.private_dir(tmp_path, create=True) / agent.UNLOCK_LOCK  # type: ignore[operator]
+    code = """import os
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+if sys.platform == "win32":
+    import msvcrt
+
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+else:
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+print("held")
+sys.stdout.flush()
+time.sleep(60)
+"""
+    child = subprocess.Popen([sys.executable, "-I", "-c", code, str(lock)], stdout=subprocess.PIPE)
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == b"held"
+        with (
+            pytest.raises(agent.AgentError, match="in progress"),
+            agent.unlock_guard(tmp_path),
+        ):
+            pass
+    finally:
+        child.kill()
+        child.wait()
+    with agent.unlock_guard(tmp_path):
+        pass
+
+
+def test_unlock_guard_body_error_propagates(tmp_path: Path) -> None:
+    class Boom(Exception):
+        pass
+
+    with pytest.raises(Boom), agent.unlock_guard(tmp_path):
+        raise Boom
+
+
+def test_unlock_guard_io_error_is_not_reported_as_contention(tmp_path: Path) -> None:
+    rdir = agent.private_dir(tmp_path, create=True)
+    assert rdir is not None
+    (rdir / agent.UNLOCK_LOCK).mkdir()
+    with pytest.raises(agent.AgentError) as caught, agent.unlock_guard(tmp_path):
+        pass
+    message = str(caught.value)
+    assert "cannot take the unlock lock" in message
+    assert "in progress" not in message
+
+
+def test_unlock_guard_does_not_use_the_0_2_0_lock_name(tmp_path: Path) -> None:
+    assert agent.UNLOCK_LOCK != "unlock.lock"
+    rdir = agent.private_dir(tmp_path, create=True)
+    assert rdir is not None
+    legacy = rdir / "unlock.lock"
+    legacy.write_bytes(b"")
+    with open(legacy, "rb"), agent.unlock_guard(tmp_path):
+        pass
+    assert legacy.exists()
 
 
 def test_agent_environment_is_minimal_and_inherits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:

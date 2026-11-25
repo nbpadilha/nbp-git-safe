@@ -46,7 +46,7 @@ Version sensitive files in a Git repo, encrypted, with **latest version + full h
 - Windows: AF_PIPE `\\.\pipe\nbp-git-safe-<random>` created with ctypes (DACL for the current user, reject remote clients, first-instance claim); POSIX: AF_UNIX in a 0700 dir with peer-uid checks, `RLIMIT_CORE=0`.
 - `agent.json` in a verified per-user directory OUTSIDE `.git` (see `docs/FORMAT.md` section 11): address, nonce, pid, expiry; the authkey is derived from `agent.secret`, never stored. **Never the encryption key.**
 - Ops: hello, status, enc_blob, dec_blob, enc_index, dec_index, mac, key_id, lock. Key never leaves the agent.
-- `unlock` runs `keyCommand` in the CLI process (foreground, so interactive prompts like Windows Hello appear), 120 s timeout, validates base64→64 bytes, sends to agent over the authenticated channel. Agent starts detached (`DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`, pythonw on Windows; `start_new_session` on POSIX). Absolute TTL + optional idle timeout. Orphan `agent.json` detected and removed.
+- `unlock` runs `keyCommand` in the CLI process (foreground, so interactive prompts like Windows Hello appear), 120 s timeout, validates base64→64 bytes, sends to agent over the authenticated channel. Agent starts detached (`DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`, pythonw on Windows, or python.exe from the same folder when a Windows policy blocks pythonw (since 0.2.1); `start_new_session` on POSIX). Absolute TTL + optional idle timeout. Orphan `agent.json` detected and removed.
 - Hooks never prompt by default; locked → clear error "run `nbp-git-safe unlock`".
 
 ## Guard on the main branch (defence in depth)

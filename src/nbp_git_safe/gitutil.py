@@ -83,6 +83,13 @@ def hide_child_windows(on: bool = True) -> None:
     _hide_windows = on
 
 
+def protect_process_env() -> None:
+    """Windows ``CreateProcess`` reads ``NoDefaultCurrentDirectoryInExePath`` from the CALLING
+    process, not from the child environment: set it here too, so a bare-name search by
+    ``subprocess`` never looks in the current directory."""
+    os.environ[NO_CWD_EXE] = "1"
+
+
 def window_flags() -> dict[str, int]:
     """``creationflags`` for a child process (empty unless ``hide_child_windows`` was called)."""
     if _hide_windows and sys.platform == "win32":
@@ -189,7 +196,9 @@ def resolve_executable(
     repositories in ``avoid`` (a project's ``node_modules/.bin`` or ``bin/``, put on ``PATH`` by
     an activated environment, is as hostile as the working directory itself). A name that already
     has a directory part is returned unchanged; when nothing is found the bare name is returned
-    (children still get ``NoDefaultCurrentDirectoryInExePath=1``)."""
+    (harmless there: the process itself runs with ``NoDefaultCurrentDirectoryInExePath=1``, set by
+    ``protect_process_env``, so the search for a bare name never reaches the current
+    directory)."""
     if os.path.dirname(name):
         return name
     source = os.environ if env is None else env
