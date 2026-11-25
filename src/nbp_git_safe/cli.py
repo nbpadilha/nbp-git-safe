@@ -16,6 +16,7 @@ from nbp_git_safe import (
     crypto,
     doctor,
     fleetcli,
+    gitutil,
     guard,
     hooks,
     keyid,
@@ -848,6 +849,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] = ()) -> int:
+    gitutil.protect_process_env()
     parser = build_parser()
     try:
         args = parser.parse_args(list(argv))
