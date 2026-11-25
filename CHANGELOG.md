@@ -2,6 +2,33 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
+## 0.2.1 - unreleased
+
+Fixes from the independent re-review of the 0.2.0 delta (the item open in `ROADMAP.md` section 1)
+and Windows robustness.
+
+### Security
+- Windows: the bare-name fallback of `keyCommand`/`git` could run a program planted in the
+  current directory (the repository root, for hooks): `NoDefaultCurrentDirectoryInExePath=1` was
+  set for children only, while `CreateProcess` reads it from the calling process. The process now
+  sets it at start-up (medium).
+- The unlock guard took over a lock older than 180 s although `keyCommand` may run up to 3600 s,
+  so two unlocks could run at once and start two agents. It is now an operating-system lock,
+  released only when its holder ends (medium).
+- The redacted stderr quote of a failing unattended `keyCommand` kept the short last line of a
+  wrapped base64 key; 8+ character tokens holding a digit or `=` padding are now redacted (low).
+- With `autoUnlock` on, an agent that cannot be inspected (another elevation level) lost its
+  reason through the failed auto-unlock and the hooks only warned; they refuse again (low).
+
+### Windows
+- When Application Control or Smart App Control blocks `pythonw.exe` (WinError 4551), the key
+  agent starts with `python.exe` (still without a window) instead of failing after the password
+  manager already released the key.
+- `doctor` reports a hook interpreter that does not exist, an App Execution Alias (`WindowsApps`)
+  or a Python inside an app's virtualised folder (`Packages/.../LocalCache`), and, in the
+  single-repository `doctor`, whether Windows blocks `pythonw.exe` (the tray and `autostart`
+  need it).
+
 ## 0.2.0 - 2026-10-05
 
 Everything since 0.1.0: the POSIX fixes that were prepared as `0.1.1` (that version was never tagged

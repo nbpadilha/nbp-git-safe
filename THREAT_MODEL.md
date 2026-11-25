@@ -74,8 +74,8 @@ attacks on the `cryptography` library itself.
 * **Hostile working tree.** `git` and `keyCommand` are resolved to absolute paths outside the
   current directory and outside the repository tree (`PATH` entries inside the repository, such as
   a `node_modules/.bin` or a `bin/` of the project, are skipped; when nothing else is found the
-  bare name is used and the system search applies), and children get
-  `NoDefaultCurrentDirectoryInExePath=1`; the auxiliary git that matches patterns runs with an
+  bare name is used and the system search applies, without the current directory), and both this
+  process and its children run with `NoDefaultCurrentDirectoryInExePath=1`; the auxiliary git that matches patterns runs with an
   environment without the repository-binding variables and without the variables that inject
   configuration or programs (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`,
   `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH*`, `GIT_EDITOR`,
