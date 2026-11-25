@@ -120,6 +120,16 @@ def test_a_live_holder_blocks_and_a_dead_one_frees_the_lock_at_once(tmp_path: Pa
             proc.stdout.close()
 
 
+def test_a_held_lock_makes_the_second_lock_busy(tmp_path: Path) -> None:
+    lock = tmp_path / "busy.lock"
+    with (
+        statefile.file_lock(lock),
+        pytest.raises(statefile.LockBusyError),
+        statefile.file_lock(lock, wait=0.0),
+    ):
+        pass
+
+
 def test_two_threads_never_hold_the_lock_together(tmp_path: Path) -> None:
     lock = tmp_path / "t.lock"
     inside = 0

@@ -31,6 +31,10 @@ class StateFileError(Exception):
     """A state file could not be read, locked or written. Messages carry no file content."""
 
 
+class LockBusyError(StateFileError):
+    """Another process holds the lock."""
+
+
 def read_small(path: Path, max_size: int) -> bytes | None:
     """The content of a plain regular file (``None`` when absent). A link, a special file or an
     oversized file raises ``plainfile.UnsafeFileError`` before a byte is read."""
@@ -110,7 +114,7 @@ def file_lock(path: Path, *, wait: float = LOCK_WAIT) -> Iterator[None]:
     try:
         while not _try_lock(fd):
             if time.monotonic() >= deadline:
-                raise StateFileError("another process is writing this file; try again")
+                raise LockBusyError("another process is writing this file; try again")
             time.sleep(LOCK_STEP)
         try:
             yield

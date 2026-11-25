@@ -53,7 +53,7 @@ PROTO = 1
 STATE_VERSION = 2  # agent.json layout (v1 stored the authkey and lived inside .git)
 AGENT_JSON = "agent.json"
 SECRET_FILE = "agent.secret"  # noqa: S105 - a file name, not a secret
-UNLOCK_LOCK = "unlock.lock"
+UNLOCK_LOCK = "unlock.oslock"  # not the 0.2.0 "unlock.lock": 0.2.0 deleted its lock file
 RUNTIME_NAME = "nbp-git-safe"
 SECRET_LEN = 32
 AUTHKEY_LEN = 32
@@ -1408,8 +1408,10 @@ def unlock_guard(state_dir: Path) -> Any:
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(statefile.file_lock(path, wait=0.0))
-        except statefile.StateFileError:
+        except statefile.LockBusyError:
             raise AgentError("another unlock is in progress") from None
+        except statefile.StateFileError as exc:
+            raise AgentError(f"cannot take the unlock lock: {exc}") from None
         yield
 
 

@@ -598,6 +598,28 @@ def test_unlock_guard_body_error_propagates(tmp_path: Path) -> None:
         raise Boom
 
 
+def test_unlock_guard_io_error_is_not_reported_as_contention(tmp_path: Path) -> None:
+    rdir = agent.private_dir(tmp_path, create=True)
+    assert rdir is not None
+    (rdir / agent.UNLOCK_LOCK).mkdir()
+    with pytest.raises(agent.AgentError) as caught, agent.unlock_guard(tmp_path):
+        pass
+    message = str(caught.value)
+    assert "cannot take the unlock lock" in message
+    assert "in progress" not in message
+
+
+def test_unlock_guard_does_not_use_the_0_2_0_lock_name(tmp_path: Path) -> None:
+    assert agent.UNLOCK_LOCK != "unlock.lock"
+    rdir = agent.private_dir(tmp_path, create=True)
+    assert rdir is not None
+    legacy = rdir / "unlock.lock"
+    legacy.write_bytes(b"")
+    with open(legacy, "rb"), agent.unlock_guard(tmp_path):
+        pass
+    assert legacy.exists()
+
+
 def test_agent_environment_is_minimal_and_inherits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("NBP_SAFE_SOMETHING", "PYTHONPATH", "PYTHONSTARTUP", "KEEP_ME"):
         monkeypatch.setenv(name, "x")
