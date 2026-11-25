@@ -1397,32 +1397,20 @@ def spawn_agent(state_dir: Path, ttl: float, idle_timeout: float | None) -> Agen
 
 @contextlib.contextmanager
 def unlock_guard(state_dir: Path) -> Any:
-    """Serialize concurrent ``unlock`` calls with an exclusive lock file (stale after 3 min)."""
+    """Serialize concurrent ``unlock`` calls with an OS lock: held only while its holder lives, so
+    no lock is stale and a file left behind by a dead holder does not block anyone."""
     rdir = private_dir(state_dir, create=True)
     assert rdir is not None
     path = rdir / UNLOCK_LOCK
-    for _ in range(2):
+    # statefile imports agent, so it comes in here to avoid an import cycle
+    from nbp_git_safe import statefile
+
+    with contextlib.ExitStack() as stack:
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            try:
-                age = time.time() - path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > 180:
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
-                continue
+            stack.enter_context(statefile.file_lock(path, wait=0.0))
+        except statefile.StateFileError:
             raise AgentError("another unlock is in progress") from None
-        os.close(fd)
-        break
-    else:  # pragma: no cover - lost the race twice
-        raise AgentError("another unlock is in progress")
-    try:
         yield
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
 
 
 def deliver_key(
