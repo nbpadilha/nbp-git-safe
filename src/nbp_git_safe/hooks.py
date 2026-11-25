@@ -322,12 +322,18 @@ def acquire_backend(repo: Repo, cfg: Config) -> tuple[agent.AgentClient | None, 
     for attempt in range(2):
         try:
             client = agent.AgentClient.connect(repo.state_dir)
+        except agent.ProcessInspectionError as exc:
+            # the agent runs at another elevation level: autoUnlock from this one cannot fix that
+            return None, str(exc)
         except agent.AgentError as exc:
             reason = str(exc)
         else:
             try:
                 client.key_id()
                 return client, ""
+            except agent.ProcessInspectionError as exc:
+                client.close()
+                return None, str(exc)
             except agent.AgentError as exc:
                 reason = str(exc)
                 client.close()

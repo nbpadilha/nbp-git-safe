@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nbp_git_safe import agent, gitutil, hooks, winsec
+from nbp_git_safe import agent, gitutil, hooks, unlock, winsec
 
 # ------------------------------------------------------------- agent identity and elevation
 
@@ -89,6 +89,26 @@ def test_hooks_fall_back_to_the_path_check_and_say_why(monkeypatch: pytest.Monke
     hint = hooks._locked_hint(reason)
     assert hint.startswith("agent unavailable") and "elevation" in hint
     assert "run `nbp-git-safe unlock`" not in hint  # unlocking again would not help
+
+
+def test_an_inspection_failure_with_auto_unlock_still_refuses_without_unlocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hook must refuse at the inspection itself: autoUnlocking from this process (or asking
+    the password manager at another elevation level) cannot make the agent inspectable."""
+
+    def refuse(_state_dir: object) -> object:
+        raise agent.ProcessInspectionError(agent.ELEVATION_MESSAGE)
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("autoUnlock must not run when the agent cannot be inspected")
+
+    monkeypatch.setattr(agent.AgentClient, "connect", staticmethod(refuse))
+    monkeypatch.setattr(unlock, "unlock", never)
+    repo = SimpleNamespace(state_dir=Path("unused"))
+    cfg = SimpleNamespace(auto_unlock=True, key_command=["op", "read", "key"])
+    client, reason = hooks.acquire_backend(repo, cfg)  # type: ignore[arg-type]
+    assert client is None and hooks._inspection_failed(reason)
 
 
 # ------------------------------------------------------------------------ DACL aliases
