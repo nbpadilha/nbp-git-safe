@@ -39,6 +39,14 @@ def test_agent_executables_without_pythonw_sibling(
     assert agent._agent_executables() == [exe]
 
 
+def _win_error(errno_: int, message: str, winerror: int) -> OSError:
+    """``OSError`` as Windows raises it. ``winerror`` is only filled in by the OSError
+    constructor on Windows, so set it by hand to make these tests run on POSIX too."""
+    exc = OSError(errno_, message)
+    exc.winerror = winerror  # type: ignore[attr-defined]
+    return exc
+
+
 class _Started(Exception):
     """Sentinel raised by the fake ``Popen`` to mark a simulated successful start."""
 
@@ -62,7 +70,7 @@ def test_spawn_falls_back_to_python_exe(tmp_path: Path, monkeypatch: pytest.Monk
     def fake_popen(argv: list[str], *args: object, **kwargs: object) -> object:
         calls.append(argv)
         if argv[0].endswith("pythonw.exe"):
-            raise OSError(22, "blocked", None, 4551)
+            raise _win_error(22, "blocked", 4551)
         raise _Started()
 
     monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
@@ -81,7 +89,7 @@ def test_spawn_falls_back_on_policy_block_1260(
     def fake_popen(argv: list[str], *args: object, **kwargs: object) -> object:
         calls.append(argv)
         if argv[0].endswith("pythonw.exe"):
-            raise OSError(2, "blocked by policy", None, 1260)
+            raise _win_error(2, "blocked by policy", 1260)
         raise _Started()
 
     monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
@@ -130,7 +138,7 @@ def test_spawn_raises_agent_error_when_every_interpreter_is_blocked(
     _fake_spawn_setup(tmp_path, monkeypatch)
 
     def fake_popen(argv: list[str], *args: object, **kwargs: object) -> object:
-        raise OSError(22, "blocked", None, 4551)
+        raise _win_error(22, "blocked", 4551)
 
     monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
     with pytest.raises(agent.AgentError) as excinfo:
