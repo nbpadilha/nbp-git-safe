@@ -2,7 +2,7 @@
 
 All notable changes. The format follows "Keep a Changelog"; versions follow SemVer once 0.1.0 is out.
 
-## 0.2.1 - unreleased
+## 0.2.1 - 2026-11-25
 
 Fixes from the independent re-review of the 0.2.0 delta (the item open in `ROADMAP.md` section 1)
 and Windows robustness.
