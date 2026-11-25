@@ -377,8 +377,9 @@ def run_doctor(
     if probe_pythonw and pythonw_blocked() is True:
         add(
             WARN,
-            "Windows blocks pythonw.exe (Application Control or Smart App Control): unlock starts "
-            "the key agent with python.exe instead, but the tray and `autostart` cannot run",
+            "Windows cannot start pythonw.exe (Application Control or Smart App Control?): the "
+            "tray and `autostart` cannot run; when a policy is the cause, unlock starts the key "
+            "agent with python.exe instead",
         )
     return found
 
