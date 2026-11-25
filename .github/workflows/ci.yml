@@ -13,6 +13,13 @@ on:
 permissions:
   contents: read
 
+# Nova execucao no mesmo ref cancela a anterior em PR e em branch ci-*. Em main nenhuma rodada em andamento
+# e cancelada, mas uma rodada ainda na fila pode ser substituida pela mais nova (dois pushes seguidos podem
+# pular a do meio).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/ci-') }}
+
 jobs:
   quick:
     name: quick / ${{ matrix.os }}
@@ -39,8 +46,8 @@ jobs:
       - name: Integration tests (fast feedback, no coverage)
         run: uv run pytest -q --no-cov tests/integration
 
+  # Sem 'needs: quick': a matriz ja cobre o que o quick roda, e esperar por ele punha os ~649 s do macOS na frente do Windows.
   test:
-    needs: quick
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -48,6 +55,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
+        # Linux cobre os 3 Pythons; Windows e macOS cobrem o mais antigo e o mais novo.
+        exclude:
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
